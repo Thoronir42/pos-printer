@@ -1,0 +1,26 @@
+meta {
+  name: test print
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{BaseUrl}}/?locale=cs
+  body: json
+  auth: inherit
+}
+
+params:query {
+  locale: cs
+}
+
+body:json {
+  {
+    "text": "Nazdar Audiolibrix\ndev týme"
+  }
+  
+}
+
+settings {
+  encodeUrl: true
+}

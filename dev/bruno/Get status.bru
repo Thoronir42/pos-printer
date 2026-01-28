@@ -1,0 +1,15 @@
+meta {
+  name: Get status
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{BaseUrl}}/
+  body: none
+  auth: inherit
+}
+
+settings {
+  encodeUrl: true
+}
