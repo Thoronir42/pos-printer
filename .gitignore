@@ -2,5 +2,6 @@
 !.env.example
 
 data/.*
+data/prints/*
 
 node_modules

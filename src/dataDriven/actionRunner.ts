@@ -1,3 +1,4 @@
+import { Request } from "@oak/oak";
 import { AppError } from "../AppError.ts";
 import { JSONSchemaType, Validator } from "../validation.ts";
 
@@ -12,7 +13,7 @@ export class ActionRunner {
     ): Promise<Response> {
         let params = {}
         if (req.headers.get("content-type")?.includes("application/json")) {
-            params = await req.json()
+            params = await req.body.json()
         }
         const errors = this.validator.validate(action.schema, params)
         if (errors) {
@@ -32,6 +33,12 @@ export class ActionRunner {
                         error: e.code,
                         details: e.details,
                     }), { status: 404 })
+                }
+                if (e.code === "access-denied") {
+                    return new Response(JSON.stringify({
+                        error: e.code,
+                        details: e.details,
+                    }), { status: 423 })
                 }
             }
             console.error("Action error:", e)

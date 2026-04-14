@@ -1,4 +1,4 @@
-import { applyMappingForLocale, getPrinter, loadImage } from "../printer.ts";
+import { applyMappingForLocale, getPrinter } from "../utils/printer.ts";
 import { command, create } from "@md/cli";
 
 export const cmd = command({
@@ -9,6 +9,10 @@ export const cmd = command({
     }
 }).runner(async ([text], flags) => {
     const printer = await getPrinter()
+    if (!printer) {
+        throw new Error('No printer found')
+    }
+
     const locale = flags.locale || 'cs'
     const mapping = applyMappingForLocale(printer, locale)
 
@@ -24,7 +28,7 @@ export const cmd = command({
     await new Promise<void>((resolve) => printer.flush(() => resolve()))
 
     printer
-        .barcode('000000670000', 'EAN13', {width: 3, height: 40, includeParity: false})
+        .barcode('000000670000', 'EAN13', { width: 3, height: 40, position: 'OFF', font: 'A', includeParity: false })
         .cut()
 
     await new Promise<void>((resolve) => printer.flush(() => resolve()))
@@ -33,4 +37,6 @@ export const cmd = command({
     console.log("Done")
 })
 
-create('print-encodings-cli', {cmd}).run(['cmd', ...Deno.args])
+if (import.meta.main) {
+    create('print-encodings-cli', { cmd }).run(['cmd', ...Deno.args])
+}

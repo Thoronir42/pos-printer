@@ -5,22 +5,21 @@ meta {
 }
 
 post {
-  url: {{BaseUrl}}/?locale=cs
+  url: {{BaseUrl}}/transfer-receipt
   body: json
   auth: inherit
 }
 
-params:query {
-  locale: cs
-}
-
 body:json {
   {
-    "text": "Nazdar Audiolibrix\ndev týme"
+    "locale": "cs",
+    "attendee": "1235",
+    "date": "28.1. 20:49"
   }
   
 }
 
 settings {
   encodeUrl: true
+  timeout: 0
 }

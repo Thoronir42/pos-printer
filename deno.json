@@ -1,14 +1,21 @@
 {
   "tasks": {
-    "dev": "deno run --env-file --allow-env=NODE_NDEBUG,PREBUILDS_ONLY,POS_PRINTER_HEADER_IMG,ELECTRON_RUN_AS_NODE,npm_config_arch,npm_config_platform,LIBC,ARM_VERSION,NODE_USB_PATH,USB_PREBUILD --allow-read --allow-net=0.0.0.0:3639 --allow-ffi=. --watch main.ts"
+    "dev": "deno run --env-file --allow-env=NODE_NDEBUG,PREBUILDS_ONLY,POS_PRINTER_HEADER_IMG,ELECTRON_RUN_AS_NODE,npm_config_arch,npm_config_platform,LIBC,ARM_VERSION,NODE_USB_PATH,USB_PREBUILD,POS_HISTORY_PRINTS --allow-read --allow-write=./data/prints/ --allow-net=0.0.0.0:3639 --allow-ffi=. --watch main.ts"
   },
   "imports": {
     "@md/cli": "jsr:@md/cli@^0.0.2",
+    "@oak/oak": "jsr:@oak/oak@^17.2.0",
     "@resvg/resvg-js": "npm:@resvg/resvg-js@^2.6.2",
     "@std/expect": "jsr:@std/expect@^1.0.17",
+    "@types/escpos": "npm:@types/escpos@^2.5.5",
     "ajv": "npm:ajv@^8.17.1",
     "escpos": "npm:escpos@^3.0.0-alpha.6"
   },
   "nodeModulesDir": "auto",
-  "allowScripts": ["npm:esbuild@0.27.2", "npm:fsevents@2.3.3", "npm:usb@2.17.0"]
+  "allowScripts": ["npm:esbuild@0.27.2", "npm:fsevents@2.3.3", "npm:usb@2.17.0"],
+  "lint": {
+    "exclude": [
+      "lib/escpos-usb/index.cjs"
+    ]
+  }
 }
