@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer";
 import escpos from "escpos";
-import { loadImage, loadImageFromDataUri } from "./image.ts";
 
 type UsbDeviceDescriptor = {
     idVendor?: number,
@@ -221,5 +220,3 @@ export function applyMappingForLocale(
 
     return mapping
 }
-
-export { loadImage, loadImageFromDataUri }

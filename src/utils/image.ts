@@ -1,6 +1,9 @@
 import { Buffer } from "node:buffer";
 import escpos from "escpos";
 import { Resvg, type ResvgRenderOptions } from "@resvg/resvg-js";
+import { decode as decodeWebp } from "@jsquash/webp";
+import { encode as encodePng } from "@jsquash/png";
+import type { AppContext } from "./context.ts";
 
 const DpiMode = {
     'S8': 90,
@@ -23,6 +26,12 @@ export type LoadImageOpts = {
     dpiMode?: keyof typeof DpiMode,
 }
 
+type EscposImageWithPixels = InstanceType<typeof escpos.Image> & {
+    pixels: {
+        shape: [number, number, number],
+    },
+}
+
 function loadImageFromBuffer(buffer: Buffer, mimeType: string): Promise<InstanceType<typeof escpos.Image>> {
     const dataUri = `data:${mimeType};base64,${buffer.toString('base64')}`
     return new Promise((resolve, reject) => {
@@ -34,6 +43,14 @@ function loadImageFromBuffer(buffer: Buffer, mimeType: string): Promise<Instance
             }
         });
     });
+}
+
+export function formatDimensions(dimensions: ImageDimensions | null) {
+    if (!dimensions) {
+        return "unknown";
+    }
+
+    return `${dimensions.width}x${dimensions.height}`;
 }
 
 function renderSvgToImage(svgData: string, opts?: LoadImageOpts): Promise<InstanceType<typeof escpos.Image>> {
@@ -50,7 +67,7 @@ function renderSvgToImage(svgData: string, opts?: LoadImageOpts): Promise<Instan
     const pngData = new Resvg(svgData, resvgOpts)
         .render()
     const pngBuffer = pngData.asPng()
-    return loadImageFromBuffer(Buffer.from(pngBuffer), 'image/png')
+    return loadImageFromBuffer(Buffer.from(pngBuffer as unknown as ArrayBuffer), 'image/png')
 }
 
 export function parseDataUri(dataUri: string): { mimeType: string, buffer: Buffer } | null {
@@ -73,9 +90,35 @@ export function parseDataUri(dataUri: string): { mimeType: string, buffer: Buffe
     }
 }
 
-type ImageDimensions = {
+export type ImageDimensions = {
     width: number,
     height: number,
+}
+
+export function getImageMimeType(filePath: string | undefined, headerValue: string | null) {
+    const normalizedHeader = headerValue?.split(";")[0]?.trim().toLowerCase();
+    if (normalizedHeader?.startsWith("image/")) {
+        return normalizedHeader;
+    }
+
+    const normalizedPath = filePath?.toLowerCase() ?? "";
+    if (normalizedPath.endsWith(".jpg") || normalizedPath.endsWith(".jpeg")) {
+        return "image/jpeg";
+    }
+
+    if (normalizedPath.endsWith(".png")) {
+        return "image/png";
+    }
+
+    if (normalizedPath.endsWith(".gif")) {
+        return "image/gif";
+    }
+
+    if (normalizedPath.endsWith(".webp")) {
+        return "image/webp";
+    }
+
+    return null;
 }
 
 function getPngDimensions(buffer: Buffer): ImageDimensions | null {
@@ -193,7 +236,7 @@ function getWebpDimensions(buffer: Buffer): ImageDimensions | null {
     return null
 }
 
-function getImageDimensions(buffer: Buffer, mimeType: string): ImageDimensions | null {
+export function getImageDimensions(buffer: Buffer, mimeType: string): ImageDimensions | null {
     switch (mimeType.toLowerCase()) {
         case 'image/png':
             return getPngDimensions(buffer)
@@ -207,6 +250,16 @@ function getImageDimensions(buffer: Buffer, mimeType: string): ImageDimensions |
         default:
             return null
     }
+}
+
+export function getEscposImageDimensions(image: InstanceType<typeof escpos.Image>): ImageDimensions | null {
+    const withPixels = image as EscposImageWithPixels;
+    const [width, height] = withPixels.pixels.shape;
+    if (width < 1 || height < 1) {
+        return null;
+    }
+
+    return { width, height };
 }
 
 export function extensionFromMimeType(mimeType: string): string {
@@ -236,6 +289,12 @@ function escapeAttribute(value: string): string {
         .replace(/>/g, '&gt;')
 }
 
+async function convertWebpToPng(buffer: Buffer): Promise<Buffer> {
+    const imageData = await decodeWebp(buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) as ArrayBuffer);
+    const pngBuffer = await encodePng(imageData);
+    return Buffer.from(pngBuffer);
+}
+
 function resizeRasterBufferToWidth(buffer: Buffer, mimeType: string, opts?: LoadImageOpts): Buffer {
     if (!opts?.width) {
         return buffer
@@ -250,11 +309,11 @@ function resizeRasterBufferToWidth(buffer: Buffer, mimeType: string, opts?: Load
     const targetHeightPx = Math.max(1, Math.round(sourceDimensions.height * targetWidthPx / sourceDimensions.width))
     const sourceDataUri = `data:${mimeType};base64,${buffer.toString('base64')}`
 
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${targetWidthPx}" height="${targetHeightPx}" viewBox="0 0 ${targetWidthPx} ${targetHeightPx}"><image href="${escapeAttribute(sourceDataUri)}" width="${targetWidthPx}" height="${targetHeightPx}" preserveAspectRatio="none"/></svg>`
-    return Buffer.from(new Resvg(svg).render().asPng())
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${targetWidthPx}" height="${targetHeightPx}" viewBox="0 0 ${targetWidthPx} ${targetHeightPx}"><rect width="${targetWidthPx}" height="${targetHeightPx}" fill="white"/><image href="${escapeAttribute(sourceDataUri)}" width="${targetWidthPx}" height="${targetHeightPx}" preserveAspectRatio="none"/></svg>`
+    return Buffer.from(new Resvg(svg).render().asPng() as unknown as ArrayBuffer)
 }
 
-export function loadImageFromDataUri(dataUri: string, opts?: LoadImageOpts): Promise<InstanceType<typeof escpos.Image>> {
+export async function loadImageFromDataUri(ctx: AppContext, dataUri: string, opts?: LoadImageOpts): Promise<InstanceType<typeof escpos.Image>> {
     const parsed = parseDataUri(dataUri)
     if (!parsed) {
         throw new Error('Invalid image data URI')
@@ -264,8 +323,27 @@ export function loadImageFromDataUri(dataUri: string, opts?: LoadImageOpts): Pro
         return renderSvgToImage(parsed.buffer.toString('utf8'), opts)
     }
 
-    const resizedBuffer = resizeRasterBufferToWidth(parsed.buffer, parsed.mimeType, opts)
+    const originalDimensions = getImageDimensions(parsed.buffer, parsed.mimeType)
+
+    const normalizedBuffer = parsed.mimeType === 'image/webp'
+        ? await convertWebpToPng(parsed.buffer)
+        : parsed.buffer;
+    const normalizedMimeType = parsed.mimeType === 'image/webp' ? 'image/png' : parsed.mimeType;
+
+    const resizedBuffer = resizeRasterBufferToWidth(normalizedBuffer, normalizedMimeType, opts)
+    const resizedDimensions = getImageDimensions(resizedBuffer, 'image/png')
+
+    ctx.logger.info(
+        `[image] loadImageFromDataUri source=${formatDimensions(originalDimensions)} mime=${parsed.mimeType} targetWidthMm=${opts?.width ?? "unchanged"}`,
+    )
+    ctx.logger.info(`[image] loadImageFromDataUri resized=${formatDimensions(resizedDimensions)} mime=image/png`)
+
     return loadImageFromBuffer(resizedBuffer, 'image/png')
+        .then((image) => {
+            const loadedDimensions = getEscposImageDimensions(image)
+            ctx.logger.info(`[image] loadImageFromDataUri loadedEscpos=${formatDimensions(loadedDimensions)}`)
+            return image
+        })
 }
 
 export async function loadImage(path: string, opts?: LoadImageOpts): Promise<InstanceType<typeof escpos.Image>> {

@@ -1,5 +1,8 @@
 import { Request } from "@oak/oak";
 import { AppError } from "../AppError.ts";
+import type { AppContext } from "../utils/context.ts";
+import { createContext } from "../utils/context.ts";
+import { createLogger } from "../utils/logger.ts";
 import { JSONSchemaType, Validator } from "../validation.ts";
 
 export class ActionRunner {
@@ -7,10 +10,14 @@ export class ActionRunner {
 
     }
 
-    public async runAction<Params extends object, Result extends object|void = void>(
+    public async runAction<Params extends object, Result extends ActionResult = void>(
         action: Action<Params, Result>,
         req: Request,
     ): Promise<Response> {
+        const requestId = crypto.randomUUID();
+        const ctx: AppContext = createContext(createLogger({requestId}));
+        ctx.logger.info("request", { method: req.method, path: req.url.pathname })
+
         let params = {}
         if (req.headers.get("content-type")?.includes("application/json")) {
             params = await req.body.json()
@@ -24,7 +31,7 @@ export class ActionRunner {
         }
 
         try {
-            const result = await action.run(params as Params)
+            const result = await action.run(ctx, params as Params)
             return new Response(JSON.stringify(result), { status: 200 })
         } catch (e) {
             if (e instanceof AppError) {
@@ -41,7 +48,7 @@ export class ActionRunner {
                     }), { status: 423 })
                 }
             }
-            console.error("Action error:", e)
+            ctx.logger.error("Action error", { error: e instanceof Error ? e.message : String(e) })
             return new Response("Internal Server Error", { status: 500 })
         }
     }
@@ -49,7 +56,7 @@ export class ActionRunner {
 
 export type Action<Params extends object, Result extends ActionResult = void> = {
     schema: JSONSchemaType<Params>,
-    run: (params: Params) => Promise<Result>,
+    run: (ctx: AppContext, params: Params) => Promise<Result>,
 }
 type ActionResult = object | boolean | void
 

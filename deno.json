@@ -1,11 +1,14 @@
 {
   "tasks": {
+    "bot": "deno run --env-file --allow-env=NODE_NDEBUG,PREBUILDS_ONLY,POS_PRINTER_HEADER_IMG,ELECTRON_RUN_AS_NODE,npm_config_arch,npm_config_platform,LIBC,ARM_VERSION,NODE_USB_PATH,USB_PREBUILD,POS_HISTORY_PRINTS,TELEGRAM_BOT_TOKEN --allow-read --allow-write=./data/prints/ --allow-net=api.telegram.org --allow-ffi=. main.ts bot",
     "dev": "deno run --env-file --allow-env=NODE_NDEBUG,PREBUILDS_ONLY,POS_PRINTER_HEADER_IMG,ELECTRON_RUN_AS_NODE,npm_config_arch,npm_config_platform,LIBC,ARM_VERSION,NODE_USB_PATH,USB_PREBUILD,POS_HISTORY_PRINTS --allow-read --allow-write=./data/prints/ --allow-net=0.0.0.0:3639 --allow-ffi=. --watch main.ts"
   },
   "imports": {
     "@md/cli": "jsr:@md/cli@^0.0.2",
     "@oak/oak": "jsr:@oak/oak@^17.2.0",
     "@resvg/resvg-js": "npm:@resvg/resvg-js@^2.6.2",
+    "@jsquash/webp": "npm:@jsquash/webp@^1.5.0",
+    "@jsquash/png": "npm:@jsquash/png@^3.1.0",
     "@std/expect": "jsr:@std/expect@^1.0.17",
     "@types/escpos": "npm:@types/escpos@^2.5.5",
     "ajv": "npm:ajv@^8.17.1",

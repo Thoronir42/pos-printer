@@ -1,7 +1,10 @@
 import { AppError } from "../AppError.ts";
 import { defineAction } from "../dataDriven/actionRunner.ts";
-import { extensionFromMimeType, parseDataUri } from "../utils/image.ts";
-import { closePrinter, flushPrinter, getPrinter, isPrinterAccessError, loadImageFromDataUri, type PrinterSelection } from "../utils/printer.ts";
+import type { AppContext } from "../utils/context.ts";
+import { applyFloydSteinbergDithering } from "../utils/imageDithering.ts";
+import { formatDimensions, getEscposImageDimensions, getImageDimensions, loadImageFromDataUri, parseDataUri } from "../utils/image.ts";
+import { saveToHistoryPrints } from "../utils/imageStorage.ts";
+import { closePrinter, flushPrinter, getPrinter, isPrinterAccessError, type PrinterSelection } from "../utils/printer.ts";
 
 const dpiMode = "S8" as const;
 
@@ -9,36 +12,20 @@ type Params = {
     locale?: string,
     imageDataUrl: string,
     widthMm?: number,
+    dither?: boolean,
     printer?: PrinterSelection,
 };
 
-async function saveToHistoryPrints(dataUri: string): Promise<void> {
-    const historyDir = Deno.env.get("POS_HISTORY_PRINTS");
-    if (!historyDir) {
-        return;
-    }
+export type { Params as PrintImageParams };
 
-    const parsed = parseDataUri(dataUri);
-    if (!parsed) {
-        return;
-    }
-
-    const isoDate = new Date().toISOString().replace(/:/g, "-");
-    const extension = extensionFromMimeType(parsed.mimeType);
-    const dirPath = historyDir.replace(/\/+$/, "");
-    const filePath = `${dirPath}/${isoDate}.${extension}`;
-
-    await Deno.mkdir(dirPath, { recursive: true });
-    await Deno.writeFile(filePath, parsed.buffer);
-}
-
-export default defineAction({
+const action = defineAction({
     schema: {
         type: "object",
         properties: {
             locale: { type: "string", minLength: 2, maxLength: 2, nullable: true },
             imageDataUrl: { type: "string", minLength: 1 },
             widthMm: { type: "number", minimum: 1, maximum: 120, nullable: true },
+            dither: { type: "boolean", nullable: true },
             printer: {
                 type: "object",
                 nullable: true,
@@ -55,7 +42,7 @@ export default defineAction({
         additionalProperties: false,
     },
 
-    run: async (params: Params) => {
+    run: async (ctx: AppContext, params: Params) => {
         let printer
         try {
             printer = await getPrinter({ locale: params.locale, selection: params.printer });
@@ -71,15 +58,32 @@ export default defineAction({
             throw new AppError("not-found", { subject: "printer" });
         }
 
-        await saveToHistoryPrints(params.imageDataUrl);
+        saveToHistoryPrints(ctx, params.imageDataUrl)
+            .catch((err) => ctx.logger.error("Failed to save print to history", { error: err instanceof Error ? err.message : String(err) }));
 
-        const image = await loadImageFromDataUri(params.imageDataUrl, {
+        const image = await loadImageFromDataUri(ctx, params.imageDataUrl, {
             width: params.widthMm ?? 60,
             dpiMode,
+        })
+            .then((loadedImage) => {
+                ctx.logger.info('image-loaded', { dimensions: formatDimensions(getEscposImageDimensions(loadedImage)), dither: !!params.dither })
+                if (!params.dither) {
+                    return loadedImage;
+                }
+
+                const ditheredImage = applyFloydSteinbergDithering(loadedImage);
+                ctx.logger.info("image-dithered", { algorithm: "floyd-steinberg" });
+                return ditheredImage;
+            });
+
+        const printerImageDimensions = getEscposImageDimensions(image);
+        ctx.logger.info('sendingToPrinter', {
+            dimensions: printerImageDimensions ? `${printerImageDimensions.width}x${printerImageDimensions.height}` : "unknown",
+            mode: "normal",
         });
 
         printer
-            .align("LT")
+            .align("CT")
             .raster(image, "normal");
 
         printer
@@ -92,3 +96,5 @@ export default defineAction({
         return true;
     },
 });
+
+export default action;
