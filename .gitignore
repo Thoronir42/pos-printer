@@ -4,4 +4,6 @@
 data/.*
 data/prints/*
 
+dist/*
+
 node_modules

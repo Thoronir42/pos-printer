@@ -2,7 +2,7 @@ import { AppError } from "../AppError.ts";
 import { defineAction } from "../dataDriven/actionRunner.ts";
 import type { AppContext } from "../utils/context.ts";
 import { applyFloydSteinbergDithering } from "../utils/imageDithering.ts";
-import { formatDimensions, getEscposImageDimensions, getImageDimensions, loadImageFromDataUri, parseDataUri } from "../utils/image.ts";
+import { formatDimensions, getEscposImageDimensions, loadImageFromDataUri } from "../utils/image.ts";
 import { saveToHistoryPrints } from "../utils/imageStorage.ts";
 import { closePrinter, flushPrinter, getPrinter, isPrinterAccessError, type PrinterSelection } from "../utils/printer.ts";
 

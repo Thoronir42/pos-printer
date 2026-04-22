@@ -1,7 +1,11 @@
 {
   "tasks": {
     "bot": "deno run --env-file --allow-env=NODE_NDEBUG,PREBUILDS_ONLY,POS_PRINTER_HEADER_IMG,ELECTRON_RUN_AS_NODE,npm_config_arch,npm_config_platform,LIBC,ARM_VERSION,NODE_USB_PATH,USB_PREBUILD,POS_HISTORY_PRINTS,TELEGRAM_BOT_TOKEN --allow-read --allow-write=./data/prints/ --allow-net=api.telegram.org --allow-ffi=. main.ts bot",
-    "dev": "deno run --env-file --allow-env=NODE_NDEBUG,PREBUILDS_ONLY,POS_PRINTER_HEADER_IMG,ELECTRON_RUN_AS_NODE,npm_config_arch,npm_config_platform,LIBC,ARM_VERSION,NODE_USB_PATH,USB_PREBUILD,POS_HISTORY_PRINTS --allow-read --allow-write=./data/prints/ --allow-net=0.0.0.0:3639 --allow-ffi=. --watch main.ts"
+    "dev": "deno run --env-file --allow-env=NODE_NDEBUG,PREBUILDS_ONLY,POS_PRINTER_HEADER_IMG,ELECTRON_RUN_AS_NODE,npm_config_arch,npm_config_platform,LIBC,ARM_VERSION,NODE_USB_PATH,USB_PREBUILD,POS_HISTORY_PRINTS --allow-read --allow-write=./data/prints/ --allow-net=0.0.0.0:3639 --allow-ffi=. --watch main.ts",
+    "compile:linux": "deno compile --output dist/pp-linux --target x86_64-unknown-linux-gnu --allow-env --allow-read --allow-write=./data/prints/ --allow-net --allow-ffi main.ts",
+    "compile:windows": "deno compile --output dist/pp-windows --target x86_64-pc-windows-msvc --allow-env --allow-read --allow-write=./data/prints/ --allow-net --allow-ffi main.ts",
+    "compile:macos": "deno compile --output dist/pp-macos --target x86_64-apple-darwin --allow-env --allow-read --allow-write=./data/prints/ --allow-net --allow-ffi main.ts",
+    "compile": "deno task compile:linux && deno task compile:windows && deno task compile:macos"
   },
   "imports": {
     "@md/cli": "jsr:@md/cli@^0.0.2",
