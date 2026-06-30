@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>POS Printer — History Explorer</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" crossorigin="anonymous">
+    <style>
+        html, body { height: 100%; }
+        body { display: flex; flex-direction: column; }
+        #viewer {
+            position: relative;
+            flex: 1 1 auto;
+            min-height: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #111;
+            overflow: hidden;
+        }
+        #viewer img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+        }
+        #viewer .empty-state {
+            color: #666;
+        }
+        .metadata-overlay {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            max-width: min(420px, 90%);
+            max-height: calc(100% - 2rem);
+            overflow: auto;
+            opacity: 0.15;
+            transition: opacity 0.15s ease-in-out;
+            background: rgba(20, 20, 20, 0.92);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 0.5rem;
+            padding: 0.75rem 1rem;
+            font-size: 0.85rem;
+        }
+        .metadata-overlay:hover,
+        .metadata-overlay:focus-within { opacity: 1; }
+        .metadata-overlay dl { margin: 0; }
+        .metadata-overlay dt { color: #9aa0a6; font-weight: 500; }
+        .metadata-overlay dd { margin-bottom: 0.5rem; word-break: break-all; }
+        .metadata-overlay dd:last-child { margin-bottom: 0; }
+        #thumbs {
+            flex: 0 0 auto;
+            display: flex;
+            gap: 0.5rem;
+            padding: 0.5rem;
+            overflow-x: auto;
+            background: #1a1a1a;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        #thumbs img {
+            height: 72px;
+            width: auto;
+            border-radius: 0.25rem;
+            cursor: pointer;
+            border: 2px solid transparent;
+            opacity: 0.6;
+            transition: opacity 0.1s, border-color 0.1s;
+        }
+        #thumbs img:hover { opacity: 1; }
+        #thumbs img.active { border-color: var(--bs-primary); opacity: 1; }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand bg-body-tertiary px-3 flex-nowrap gap-3">
+        <span class="navbar-brand mb-0">🖨️ History Explorer</span>
+        <div class="d-flex align-items-center gap-2 flex-grow-1">
+            <label for="day-select" class="form-label mb-0 text-nowrap">Day</label>
+            <select id="day-select" class="form-select form-select-sm" style="max-width: 320px;"></select>
+            <span id="position" class="text-secondary small text-nowrap"></span>
+        </div>
+        <button id="print-btn" class="btn btn-sm btn-primary" disabled>Print</button>
+    </nav>
+
+    <div id="viewer">
+        <div class="empty-state">Loading…</div>
+        <aside class="metadata-overlay d-none" id="overlay" tabindex="0">
+            <dl id="overlay-body"></dl>
+        </aside>
+    </div>
+
+    <div id="thumbs"></div>
+
+    <div class="toast-container position-fixed bottom-0 end-0 p-3">
+        <div id="toast" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
+            <div class="d-flex">
+                <div class="toast-body" id="toast-body"></div>
+                <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast"></button>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" crossorigin="anonymous"></script>
+    <script>
+        const daySelect = document.getElementById("day-select");
+        const viewer = document.getElementById("viewer");
+        const emptyState = viewer.querySelector(".empty-state");
+        const overlay = document.getElementById("overlay");
+        const overlayBody = document.getElementById("overlay-body");
+        const thumbs = document.getElementById("thumbs");
+        const positionLabel = document.getElementById("position");
+        const printBtn = document.getElementById("print-btn");
+        const toastEl = document.getElementById("toast");
+        const toastBody = document.getElementById("toast-body");
+        const toast = new bootstrap.Toast(toastEl, { delay: 4000 });
+
+        let currentDay = "";
+        let media = [];
+        let index = 0;
+        let currentImg = null;
+
+        function formatBytes(bytes) {
+            if (!bytes) return "0 B";
+            const units = ["B", "KB", "MB", "GB"];
+            const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+            return `${(bytes / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
+        }
+
+        function showToast(message, isError) {
+            toastBody.textContent = message;
+            toastEl.className = `toast text-bg-${isError ? "danger" : "success"}`;
+            toast.show();
+        }
+
+        function syncUrl() {
+            if (!media.length) return;
+            const params = new URLSearchParams();
+            params.set("c", currentDay);
+            params.set("i", media[index].file);
+            history.replaceState(null, "", `?${params.toString()}`);
+        }
+
+        function renderOverlay(entry) {
+            const rows = [];
+            const add = (label, value) => {
+                if (value === undefined || value === null || value === "") return;
+                rows.push([label, String(value)]);
+            };
+
+            const meta = entry.metadata || {};
+            add("Sender", meta.sender);
+            add("Media", meta.mediaName);
+            add("Date", entry.receivedAt);
+            add("Message ID", meta.messageId);
+            add("Chat ID", meta.chatId);
+            add("File ID", meta.fileId);
+            add("MIME", entry.mimeType || meta.mimeType);
+            add("Size", formatBytes(entry.size));
+            if (currentImg && currentImg.naturalWidth) {
+                add("Dimensions", `${currentImg.naturalWidth} × ${currentImg.naturalHeight}`);
+            }
+            add("File", entry.file);
+
+            let html = rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHtml(v)}</dd>`).join("");
+            if (!entry.hasMetadata) {
+                html = `<dd class="mb-2"><span class="badge text-bg-warning">no sidecar metadata</span></dd>` + html;
+            }
+            overlayBody.innerHTML = html;
+        }
+
+        function escapeHtml(value) {
+            const div = document.createElement("div");
+            div.textContent = value;
+            return div.innerHTML;
+        }
+
+        function select(newIndex) {
+            if (!media.length) return;
+            index = Math.max(0, Math.min(media.length - 1, newIndex));
+            const entry = media[index];
+
+            emptyState.classList.add("d-none");
+            overlay.classList.remove("d-none");
+
+            const img = new Image();
+            img.src = entry.url;
+            img.alt = entry.file;
+            img.onload = () => renderOverlay(entry);
+            currentImg = img;
+
+            const existing = viewer.querySelector("img");
+            if (existing) existing.remove();
+            viewer.insertBefore(img, overlay);
+
+            renderOverlay(entry);
+            positionLabel.textContent = `${index + 1} / ${media.length}`;
+            printBtn.disabled = false;
+
+            thumbs.querySelectorAll("img").forEach((t, i) => {
+                t.classList.toggle("active", i === index);
+            });
+            const activeThumb = thumbs.children[index];
+            if (activeThumb) activeThumb.scrollIntoView({ block: "nearest", inline: "nearest" });
+
+            syncUrl();
+        }
+
+        function renderThumbs() {
+            thumbs.innerHTML = "";
+            media.forEach((entry, i) => {
+                const t = new Image();
+                t.src = entry.url;
+                t.title = entry.file;
+                t.addEventListener("click", () => select(i));
+                thumbs.appendChild(t);
+            });
+        }
+
+        async function loadDay(day, preselectFile) {
+            currentDay = day;
+            const res = await fetch(`/api/media?day=${encodeURIComponent(day)}`);
+            const data = await res.json();
+            media = data.media || [];
+            renderThumbs();
+
+            const existing = viewer.querySelector("img");
+            if (existing) existing.remove();
+
+            if (!media.length) {
+                overlay.classList.add("d-none");
+                emptyState.classList.remove("d-none");
+                emptyState.textContent = "No images for this day.";
+                positionLabel.textContent = "";
+                printBtn.disabled = true;
+                history.replaceState(null, "", `?c=${encodeURIComponent(day)}`);
+                return;
+            }
+
+            const foundIndex = preselectFile ? media.findIndex((m) => m.file === preselectFile) : -1;
+            select(foundIndex >= 0 ? foundIndex : 0);
+        }
+
+        async function loadDays() {
+            const res = await fetch("/api/days");
+            const data = await res.json();
+            const days = data.days || [];
+            daySelect.innerHTML = "";
+            if (!days.length) {
+                emptyState.textContent = "No history found.";
+                return;
+            }
+            for (const day of days) {
+                const opt = document.createElement("option");
+                opt.value = day.name;
+                opt.textContent = `${day.name} (${day.count})`;
+                daySelect.appendChild(opt);
+            }
+
+            const params = new URLSearchParams(location.search);
+            const wantDay = params.get("c");
+            const wantItem = params.get("i");
+            const initialDay = days.some((d) => d.name === wantDay) ? wantDay : days[0].name;
+            daySelect.value = initialDay;
+            await loadDay(initialDay, initialDay === wantDay ? wantItem : null);
+        }
+
+        daySelect.addEventListener("change", () => loadDay(daySelect.value));
+
+        printBtn.addEventListener("click", async () => {
+            if (!media.length) return;
+            const entry = media[index];
+            printBtn.disabled = true;
+            try {
+                const res = await fetch("/api/print", {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ day: currentDay, file: entry.file }),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (res.ok) {
+                    showToast(`Printing ${entry.file}`, false);
+                } else {
+                    showToast(`Print failed: ${data.message || data.error || res.status}`, true);
+                }
+            } catch (err) {
+                showToast(`Print failed: ${err}`, true);
+            } finally {
+                printBtn.disabled = false;
+            }
+        });
+
+        document.addEventListener("keydown", (e) => {
+            if (e.target.tagName === "SELECT") return;
+            if (e.key === "ArrowLeft") { select(index - 1); e.preventDefault(); }
+            else if (e.key === "ArrowRight") { select(index + 1); e.preventDefault(); }
+        });
+
+        loadDays().catch((err) => {
+            emptyState.textContent = `Failed to load: ${err}`;
+        });
+    </script>
+</body>
+</html>

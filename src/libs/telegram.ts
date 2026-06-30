@@ -16,11 +16,23 @@ export type TelegramSticker = {
     is_animated: boolean,
     is_video: boolean,
     thumb?: TelegramPhotoSize,
+    emoji?: string,
+    set_name?: string,
     file_size?: number,
+};
+
+export type TelegramUser = {
+    id: number,
+    first_name?: string,
+    last_name?: string,
+    username?: string,
 };
 
 export type TelegramMessage = {
     message_id: number,
+    /** Unix time (seconds) the message was sent. */
+    date?: number,
+    from?: TelegramUser,
     chat?: {
         id: number,
     },

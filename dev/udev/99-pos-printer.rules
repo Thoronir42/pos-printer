@@ -1,0 +1,16 @@
+# Grant non-root raw USB (libusb) access to the thermal printer so pos-printer
+# can open it. Without this, opening the device fails with LIBUSB_ERROR_ACCESS,
+# which the server reports as HTTP 423 (access-denied / usb-access-denied).
+#
+# The default /dev/bus/usb/<bus>/<dev> node is owned root:lp mode 0660, so a user
+# who is not in the `lp` group cannot open the device for writing. This rule makes
+# the node group-owned by `plugdev` (and tags it for the logged-in user's ACL).
+#
+# This file is a TEMPLATE. Prefer the installer, which fills in the IDs for you:
+#   sudo bash dev/udev/install-udev-rule.sh
+#
+# To use this file directly, replace XXXX:XXXX with your printer's
+# idVendor:idProduct (find them via the one-liner in README.md or `lsusb`), then:
+#   sudo cp dev/udev/99-pos-printer.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+SUBSYSTEM=="usb", ATTRS{idVendor}=="XXXX", ATTRS{idProduct}=="XXXX", MODE="0660", GROUP="plugdev", TAG+="uaccess"

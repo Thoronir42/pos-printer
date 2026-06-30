@@ -14,7 +14,9 @@ import {
 import type { AppContext } from "../utils/context.ts";
 import { createContext } from "../utils/context.ts";
 import { getImageDimensions } from "../utils/image.ts";
+import { saveMediaToHistory } from "../utils/imageStorage.ts";
 import type { PrinterSelection } from "../utils/printer.ts";
+import { createPrintLimiter, type PrintLimiter } from "./printLimiter.ts";
 
 const MAX_IMAGE_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_IMAGE_WIDTH_PX = 4096;
@@ -32,13 +34,17 @@ const ERROR_REPLIES = ["Hurk", "Whoops", "I lost it"];
 const SPAM_REPLIES = ["Too much", "Ouch, hot hot", "Nope", "Nuh-uh", "Get lost"];
 const RARE_SPAM_REPLY = "I'm sorry Dave, I can not let you do that";
 
-type RunTelegramBotOptions = {
+/** Options needed to download and print a single piece of Telegram media. */
+export type PrintMediaOptions = {
     token: string,
     locale?: string,
     printer?: PrinterSelection,
     widthMm?: number,
-    pollingTimeoutSeconds?: number,
     signal?: AbortSignal,
+};
+
+type RunTelegramBotOptions = PrintMediaOptions & {
+    pollingTimeoutSeconds?: number,
 };
 
 function formatDimensions(width: number, height: number) {
@@ -104,7 +110,7 @@ function getSpamReply() {
     return pickRandom(SPAM_REPLIES);
 }
 
-function getProcessableMessage(update: TelegramUpdate) {
+export function getProcessableMessage(update: TelegramUpdate) {
     const message = update.message ?? update.edited_message;
     if (!message) {
         return null;
@@ -115,6 +121,32 @@ function getProcessableMessage(update: TelegramUpdate) {
     }
 
     return null;
+}
+
+/** Human readable name of whoever sent the message. */
+export function getSenderName(message: TelegramMessage): string {
+    const from = message.from;
+    if (!from) {
+        return "unknown";
+    }
+
+    const fullName = [from.first_name, from.last_name].filter(Boolean).join(" ");
+    return fullName || from.username || `id:${from.id}`;
+}
+
+/** Human readable name of the media carried by the message. */
+export function getMediaName(message: TelegramMessage): string {
+    if (message.sticker) {
+        const { emoji, set_name } = message.sticker;
+        return [emoji, set_name].filter(Boolean).join(" ") || "sticker";
+    }
+
+    if (message.photo?.length) {
+        const photo = selectLargestPhotoVariant(message.photo);
+        return `photo ${formatDimensions(photo.width, photo.height)}`;
+    }
+
+    return "unknown";
 }
 
 function assertWithinImageLimits(width: number, height: number, fileSize?: number) {
@@ -139,7 +171,48 @@ function bufferToDataUrl(buffer: Uint8Array, mimeType: string) {
     return `data:${mimeType};base64,${Buffer.from(buffer).toString("base64")}`;
 }
 
-async function handleStickerMessage(ctx: AppContext, sticker: TelegramSticker, message: TelegramMessage, opts: RunTelegramBotOptions) {
+function messageDateToIso(message: TelegramMessage) {
+    return (message.date != null ? new Date(message.date * 1000) : new Date()).toISOString();
+}
+
+/**
+ * Archives the downloaded media (image + metadata sidecar) and then prints it.
+ * Archiving happens first and unconditionally, so media is preserved even if the
+ * printer is unavailable; the print step therefore skips its own history save.
+ */
+async function archiveAndPrint(
+    ctx: AppContext,
+    message: TelegramMessage,
+    media: { buffer: Uint8Array, mimeType: string, fileId: string },
+    opts: PrintMediaOptions,
+) {
+    await saveMediaToHistory(ctx, {
+        buffer: media.buffer,
+        mimeType: media.mimeType,
+        metadata: {
+            date: messageDateToIso(message),
+            sender: getSenderName(message),
+            mediaName: getMediaName(message),
+            messageId: message.message_id,
+            chatId: message.chat?.id,
+            fileId: media.fileId,
+        },
+    });
+
+    await printImageAction.run(
+        ctx.with((ctx) => ({...ctx, logger: ctx.logger.child({action: 'print-image'})})),
+        {
+            imageDataUrl: bufferToDataUrl(media.buffer, media.mimeType),
+            locale: opts.locale,
+            printer: opts.printer,
+            widthMm: opts.widthMm ?? DEFAULT_BOT_PRINT_WIDTH_MM,
+            dither: true,
+            saveHistory: false,
+        },
+    );
+}
+
+async function handleStickerMessage(ctx: AppContext, sticker: TelegramSticker, message: TelegramMessage, opts: PrintMediaOptions) {
     if (sticker.is_animated || sticker.is_video) {
         throw new Error(`Unsupported sticker type animated=${sticker.is_animated} video=${sticker.is_video}`);
     }
@@ -170,16 +243,7 @@ async function handleStickerMessage(ctx: AppContext, sticker: TelegramSticker, m
         `[telegram] downloaded mime=${mimeType} bytes=${buffer.byteLength} targetWidthMm=${opts.widthMm ?? DEFAULT_BOT_PRINT_WIDTH_MM}`,
     );
 
-    await printImageAction.run(
-        ctx.with((ctx) => ({...ctx, logger: ctx.logger.child({action: 'print-image'})})),
-        {
-            imageDataUrl: bufferToDataUrl(buffer, mimeType),
-            locale: opts.locale,
-            printer: opts.printer,
-            widthMm: opts.widthMm ?? DEFAULT_BOT_PRINT_WIDTH_MM,
-            dither: true,
-        },
-    );
+    await archiveAndPrint(ctx, message, { buffer, mimeType, fileId: sticker.file_id }, opts);
 
     ctx.logger.info("Printed Telegram sticker", {
         chatId: message.chat?.id ?? "unknown",
@@ -187,7 +251,7 @@ async function handleStickerMessage(ctx: AppContext, sticker: TelegramSticker, m
     });
 }
 
-async function handlePhotoMessage(ctx: AppContext, message: TelegramMessage, opts: RunTelegramBotOptions) {
+async function handlePhotoMessage(ctx: AppContext, message: TelegramMessage, opts: PrintMediaOptions) {
     const photos = message.photo;
     const photo = photos?.length ? selectLargestPhotoVariant(photos) : undefined;
     if (!photo) {
@@ -225,21 +289,21 @@ async function handlePhotoMessage(ctx: AppContext, message: TelegramMessage, opt
         `[telegram] downloaded mime=${mimeType} bytes=${buffer.byteLength} dimensions=${formatOptionalDimensions(dimensions)} targetWidthMm=${opts.widthMm ?? DEFAULT_BOT_PRINT_WIDTH_MM}`,
     );
 
-    await printImageAction.run(
-        ctx.with((ctx) => ({...ctx, logger: ctx.logger.child({action: 'print-image'})})),
-        {
-            imageDataUrl: bufferToDataUrl(buffer, mimeType),
-            locale: opts.locale,
-            printer: opts.printer,
-            widthMm: opts.widthMm ?? DEFAULT_BOT_PRINT_WIDTH_MM,
-            dither: true,
-        },
-    );
+    await archiveAndPrint(ctx, message, { buffer, mimeType, fileId: photo.file_id }, opts);
 
     ctx.logger.info("Printed Telegram photo", {
         chatId: message.chat?.id ?? "unknown",
         messageId: message.message_id,
     });
+}
+
+/** Downloads and prints whatever printable media a message carries. */
+export function processPrintableMessage(ctx: AppContext, message: TelegramMessage, opts: PrintMediaOptions) {
+    if (message.sticker) {
+        return handleStickerMessage(ctx, message.sticker, message, opts);
+    }
+
+    return handlePhotoMessage(ctx, message, opts);
 }
 
 export async function runTelegramBot(ctx: AppContext, opts: RunTelegramBotOptions) {
@@ -249,6 +313,7 @@ export async function runTelegramBot(ctx: AppContext, opts: RunTelegramBotOption
 
     let offset = 0;
     const requestTimestampsByChatId = new Map<number, number[]>();
+    const limiter: PrintLimiter = createPrintLimiter();
 
     while (!opts.signal?.aborted) {
         try {
@@ -292,11 +357,9 @@ export async function runTelegramBot(ctx: AppContext, opts: RunTelegramBotOption
                 }
 
                 try {
-                    if (message.sticker) {
-                        await handleStickerMessage(updateContext, message.sticker, message, opts);
-                    } else {
-                        await handlePhotoMessage(updateContext, message, opts);
-                    }
+                    // Serialize prints through the limiter so bursts of requests
+                    // are held until the previous print finishes.
+                    await limiter.schedule(() => processPrintableMessage(updateContext, message, opts));
 
                     await sendTelegramMessage(
                         opts.token,

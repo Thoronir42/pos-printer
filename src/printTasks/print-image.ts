@@ -4,7 +4,7 @@ import type { AppContext } from "../utils/context.ts";
 import { applyFloydSteinbergDithering } from "../utils/imageDithering.ts";
 import { formatDimensions, getEscposImageDimensions, loadImageFromDataUri } from "../utils/image.ts";
 import { saveToHistoryPrints } from "../utils/imageStorage.ts";
-import { closePrinter, flushPrinter, getPrinter, isPrinterAccessError, type PrinterSelection } from "../utils/printer.ts";
+import { closePrinter, cutPaper, flushPrinter, getPrinter, isPrinterAccessError, type PrinterSelection } from "../utils/printer.ts";
 
 const dpiMode = "S8" as const;
 
@@ -14,6 +14,8 @@ type Params = {
     widthMm?: number,
     dither?: boolean,
     printer?: PrinterSelection,
+    /** Save the image to the print history. Defaults to true. */
+    saveHistory?: boolean,
 };
 
 export type { Params as PrintImageParams };
@@ -26,6 +28,7 @@ const action = defineAction({
             imageDataUrl: { type: "string", minLength: 1 },
             widthMm: { type: "number", minimum: 1, maximum: 120, nullable: true },
             dither: { type: "boolean", nullable: true },
+            saveHistory: { type: "boolean", nullable: true },
             printer: {
                 type: "object",
                 nullable: true,
@@ -43,10 +46,19 @@ const action = defineAction({
     },
 
     run: async (ctx: AppContext, params: Params) => {
+        // Archive before touching the printer so media is preserved even when the
+        // printer is unavailable. Callers that already archived (e.g. the bot,
+        // with richer metadata) pass saveHistory: false to avoid a duplicate.
+        if (params.saveHistory !== false) {
+            saveToHistoryPrints(ctx, params.imageDataUrl)
+                .catch((err) => ctx.logger.error("Failed to save print to history", { error: err instanceof Error ? err.message : String(err) }));
+        }
+
         let printer
         try {
             printer = await getPrinter({ locale: params.locale, selection: params.printer });
         } catch (error) {
+            ctx.logger.error("Failed to open printer", { error: error instanceof Error ? error.message : String(error) });
             if (isPrinterAccessError(error)) {
                 throw new AppError("access-denied", { subject: "printer", reason: "usb-access-denied" });
             }
@@ -57,9 +69,6 @@ const action = defineAction({
         if (!printer) {
             throw new AppError("not-found", { subject: "printer" });
         }
-
-        saveToHistoryPrints(ctx, params.imageDataUrl)
-            .catch((err) => ctx.logger.error("Failed to save print to history", { error: err instanceof Error ? err.message : String(err) }));
 
         const image = await loadImageFromDataUri(ctx, params.imageDataUrl, {
             width: params.widthMm ?? 60,
@@ -86,9 +95,7 @@ const action = defineAction({
             .align("CT")
             .raster(image, "normal");
 
-        printer
-            .feed(3)
-            .cut();
+        cutPaper(printer);
 
         await flushPrinter(printer);
         await closePrinter(printer);

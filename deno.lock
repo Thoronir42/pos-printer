@@ -24,6 +24,7 @@
     "npm:@resvg/resvg-js@^2.6.2": "2.6.2",
     "npm:@types/escpos@^2.5.5": "2.5.5",
     "npm:ajv@^8.17.1": "8.17.1",
+    "npm:bottleneck@^2.19.5": "2.19.5",
     "npm:escpos@^3.0.0-alpha.6": "3.0.0-alpha.6",
     "npm:jimp@*": "1.6.1",
     "npm:path-to-regexp@^6.3.0": "6.3.0",
@@ -635,6 +636,9 @@
     "bmp-ts@1.0.9": {
       "integrity": "sha512-cTEHk2jLrPyi+12M3dhpEbnnPOsaZuq7C45ylbbQIiWgDFZq4UVYPEY5mlqjvsj/6gJv9qX5sa+ebDzLXT28Vw=="
     },
+    "bottleneck@2.19.5": {
+      "integrity": "sha512-VHiNCbI1lKdl44tGrhNfU3lup0Tj/ZBMJB5/2ZbNXRCPuRCO7ed2mgcK4r17y+KB2EfuYuRaVlwNbAeaWGSpbw=="
+    },
     "caseless@0.12.0": {
       "integrity": "sha512-4tYFyifaFfGacoiObjJegolkwSU4xQNGbVgUiNYVUxbQ2x2lUsFvY4hVgVzGiIe6WLOPqycWXA40l+PWsxthUw=="
     },
@@ -1193,6 +1197,7 @@
       "npm:@resvg/resvg-js@^2.6.2",
       "npm:@types/escpos@^2.5.5",
       "npm:ajv@^8.17.1",
+      "npm:bottleneck@^2.19.5",
       "npm:escpos@^3.0.0-alpha.6"
     ]
   }

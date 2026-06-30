@@ -171,6 +171,24 @@ export async function getPrinter(opts: PrinterOptions = {}) {
     return printer
 }
 
+/**
+ * Cut the paper after a print.
+ *
+ * escpos' built-in `.cut()` emits `GS V 0` (full cut, no feed), which many cheap
+ * thermal printers silently ignore. The "feed and full cut" function `GS V 65 n`
+ * (1D 56 41 n) is far more widely supported, so we emit that directly. `n` feeds
+ * extra dots past the cutting position so the printed content clears the blade.
+ */
+export function cutPaper(printer: escpos.Printer, { feedLines = 3, feedDots = 0 } = {}): escpos.Printer {
+    printer.feed(feedLines);
+
+    const FULL_CUT_WITH_FEED = Buffer.from([0x1d, 0x56, 0x41, feedDots & 0xff]); // GS V 65 n
+    const buffer = (printer as unknown as { buffer: { write: (data: Buffer) => void } }).buffer;
+    buffer.write(FULL_CUT_WITH_FEED);
+
+    return printer;
+}
+
 export async function flushPrinter(printer: escpos.Printer): Promise<void> {
     await new Promise<void>((resolve, reject) => {
         printer.flush((err?: Error | null) => {
