@@ -3,7 +3,7 @@ import { runTelegramBot } from "../bot/telegram.ts";
 import type { AppContext } from "../utils/context.ts";
 import { createContext } from "../utils/context.ts";
 import { createLogger } from "../utils/logger.ts";
-import { getPrinterSelection, parseWidthMm } from "./flags.ts";
+import { getPrinterSelection, parseChatId, parseWidthMm } from "./flags.ts";
 
 export const cmd = command({
     description: "Run the application in Telegram bot mode",
@@ -14,6 +14,7 @@ export const cmd = command({
         printerId: { type: "value", description: "Printer selection id passed to the print-image task" },
         widthMm: { type: "value", description: "Printed image width in mm (defaults to 72 in bot mode)" },
         pollingTimeoutSeconds: { type: "value", description: "Telegram long-poll timeout in seconds" },
+        janitorChatId: { type: "value", description: "Janitor chat id, defaults to TELEGRAM_JANITOR_CHAT_ID" },
     },
 }).runner(async (_arguments, flags) => {
     const ctx: AppContext = createContext(createLogger({ mode: "telegram-bot" }));
@@ -35,6 +36,7 @@ export const cmd = command({
     const printerId = flags.printerId
     const widthMm = parseWidthMm(flags.widthMm);
     const pollingTimeoutSeconds = Number(flags.pollingTimeoutSeconds ?? "");
+    const janitorChatId = parseChatId(flags.janitorChatId ?? Deno.env.get("TELEGRAM_JANITOR_CHAT_ID"));
 
     Deno.addSignalListener("SIGINT", handleSignal);
     Deno.addSignalListener("SIGTERM", handleSignal);
@@ -46,6 +48,7 @@ export const cmd = command({
             printer: getPrinterSelection(printerId),
             widthMm,
             pollingTimeoutSeconds,
+            janitorChatId,
             signal: signalController.signal,
         });
     } finally {

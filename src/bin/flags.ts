@@ -14,6 +14,20 @@ export function parseWidthMm(value: unknown) {
     return parsed;
 }
 
+/** Parses a Telegram chat id (integer, may be negative for groups); undefined when unset/invalid. */
+export function parseChatId(value: unknown) {
+    if (value == null || value === "") {
+        return undefined;
+    }
+
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed)) {
+        return undefined;
+    }
+
+    return parsed;
+}
+
 /** Parses the shared `--printerId` CLI flag into a printer selection. */
 export function getPrinterSelection(printerId: unknown): PrinterSelection | undefined {
     if (typeof printerId !== "string" || printerId.length === 0) {

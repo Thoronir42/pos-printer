@@ -16,6 +16,7 @@ import { bufferToDataUri, formatDimensions, getImageDimensions } from "../utils/
 import { saveMediaToHistory } from "../utils/imageStorage.ts";
 import { DEFAULT_PRINT_WIDTH_MM, type PrinterSelection } from "../utils/printer.ts";
 import { createPrintLimiter, createSpamGuard, type PrintLimiter } from "./printLimiter.ts";
+import { buildDiskReport } from "./diskUsage.ts";
 
 const MAX_IMAGE_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_IMAGE_WIDTH_PX = 4096;
@@ -43,7 +44,14 @@ export type PrintMediaOptions = {
 
 type RunTelegramBotOptions = PrintMediaOptions & {
     pollingTimeoutSeconds?: number,
+    /** Chat id of the janitor: receives the startup ping and may run commands. */
+    janitorChatId?: number,
 };
+
+const JANITOR_HELP = [
+    "pos-printer janitor commands:",
+    "/disk — print archive size and disk free space",
+].join("\n");
 
 function selectLargestPhotoVariant(photoSizes: TelegramPhotoSize[]) {
     return photoSizes.reduce((largest, candidate) => {
@@ -94,6 +102,21 @@ function getSpamReply() {
     }
 
     return pickRandom(SPAM_REPLIES);
+}
+
+/**
+ * Extracts a bot command from a message, or null when it carries none.
+ * Handles the `/cmd@BotName arg` form, returning the lower-cased `cmd`.
+ */
+export function getBotCommand(message: TelegramMessage): string | null {
+    const text = message.text?.trim();
+    if (!text || !text.startsWith("/")) {
+        return null;
+    }
+
+    const token = text.slice(1).split(/\s+/, 1)[0];
+    const command = token.split("@", 1)[0].toLowerCase();
+    return command.length ? command : null;
 }
 
 export function getProcessableMessage(update: TelegramUpdate) {
@@ -290,7 +313,62 @@ export async function runTelegramBot(ctx: AppContext, opts: RunTelegramBotOption
     const reply = (chatId: number, messageId: number, text: string) =>
         sendTelegramMessage(opts.token, chatId, text, { replyToMessageId: messageId }, opts.signal);
 
+    // Announce readiness to the janitor. A bad id must not block startup.
+    if (opts.janitorChatId != null) {
+        try {
+            await sendTelegramMessage(
+                opts.token,
+                opts.janitorChatId,
+                `✅ pos-printer is up and running as @${me.username ?? "unknown"}`,
+                undefined,
+                opts.signal,
+            );
+        } catch (error) {
+            ctx.logger.warn("Failed to notify janitor on startup", {
+                error: error instanceof Error ? error.message : String(error),
+            });
+        }
+    }
+
+    /** Runs a janitor-only command. Returns true when the message was a command. */
+    async function handleCommand(message: TelegramMessage): Promise<boolean> {
+        const command = getBotCommand(message);
+        if (!command) {
+            return false;
+        }
+
+        const chatId = message.chat?.id;
+        // Commands are janitor-only; ignore them from anyone else so the bot
+        // stays a print surface for the public, not a command surface.
+        if (chatId == null || opts.janitorChatId == null || chatId !== opts.janitorChatId) {
+            return true;
+        }
+
+        try {
+            if (command === "disk") {
+                await reply(chatId, message.message_id, await buildDiskReport(ctx));
+            } else if (command === "start" || command === "help") {
+                await reply(chatId, message.message_id, JANITOR_HELP);
+            } else {
+                await reply(chatId, message.message_id, `Unknown command /${command}\n\n${JANITOR_HELP}`);
+            }
+        } catch (error) {
+            ctx.logger.error("Failed to handle janitor command", {
+                command,
+                error: error instanceof Error ? error.message : String(error),
+            });
+            await reply(chatId, message.message_id, getErrorReply());
+        }
+
+        return true;
+    }
+
     async function handleUpdate(update: TelegramUpdate) {
+        const rawMessage = update.message ?? update.edited_message;
+        if (rawMessage && await handleCommand(rawMessage)) {
+            return;
+        }
+
         const message = getProcessableMessage(update);
         if (!message) {
             return;

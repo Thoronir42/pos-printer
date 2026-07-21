@@ -250,6 +250,72 @@ export async function listHistoryEntries(
     return entries;
 }
 
+/** Aggregate size of the on-disk print archive. */
+export type HistoryUsage = {
+    /** Total bytes of every file under the history tree (images + sidecars). */
+    totalBytes: number,
+    /** Number of files counted. */
+    fileCount: number,
+    /** Number of day subfolders directly under the base directory. */
+    dayCount: number,
+};
+
+/** Recursively sums the size of every file beneath a directory. */
+async function sumDirectorySizes(dirPath: string): Promise<{ bytes: number, files: number }> {
+    let entries: Deno.DirEntry[];
+    try {
+        entries = await Array.fromAsync(Deno.readDir(dirPath));
+    } catch {
+        return { bytes: 0, files: 0 };
+    }
+
+    let bytes = 0;
+    let files = 0;
+    for (const entry of entries) {
+        const path = `${dirPath}/${entry.name}`;
+        if (entry.isDirectory) {
+            const nested = await sumDirectorySizes(path);
+            bytes += nested.bytes;
+            files += nested.files;
+            continue;
+        }
+
+        if (entry.isFile) {
+            try {
+                bytes += (await Deno.stat(path)).size;
+                files += 1;
+            } catch {
+                // File vanished between readDir and stat — ignore it.
+            }
+        }
+    }
+
+    return { bytes, files };
+}
+
+/**
+ * Sums the on-disk size of the whole history archive (all files, not just
+ * images), plus file and day counts. Returns zeros when the tree is missing or
+ * empty. Used by the janitor disk-usage report.
+ */
+export async function getHistoryUsage(): Promise<HistoryUsage> {
+    const baseDirPath = getHistoryBaseDir();
+
+    let dayCount = 0;
+    try {
+        for await (const entry of Deno.readDir(baseDirPath)) {
+            if (entry.isDirectory) {
+                dayCount += 1;
+            }
+        }
+    } catch {
+        return { totalBytes: 0, fileCount: 0, dayCount: 0 };
+    }
+
+    const { bytes, files } = await sumDirectorySizes(baseDirPath);
+    return { totalBytes: bytes, fileCount: files, dayCount };
+}
+
 /** A day (subfolder) in the history archive, with its image count. */
 export type HistoryDay = {
     /** Folder name (typically `YYYY-MM-DD`). */

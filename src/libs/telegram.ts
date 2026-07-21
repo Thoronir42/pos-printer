@@ -36,6 +36,8 @@ export type TelegramMessage = {
     chat?: {
         id: number,
     },
+    /** Plain text body, present for text messages and commands. */
+    text?: string,
     photo?: TelegramPhotoSize[],
     sticker?: TelegramSticker,
 };
