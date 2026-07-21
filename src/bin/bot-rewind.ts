@@ -3,30 +3,9 @@ import { runRewind } from "../bot/rewind.ts";
 import type { AppContext } from "../utils/context.ts";
 import { createContext } from "../utils/context.ts";
 import { createLogger } from "../utils/logger.ts";
-import type { PrinterSelection } from "../utils/printer.ts";
+import { getPrinterSelection, parseWidthMm } from "./flags.ts";
 
 const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-
-function parseWidthMm(value: unknown) {
-    if (value == null || value === "") {
-        return undefined;
-    }
-
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 120) {
-        throw new Error("widthMm must be a number between 1 and 120");
-    }
-
-    return parsed;
-}
-
-function getPrinterSelection(printerId: unknown): PrinterSelection | undefined {
-    if (typeof printerId !== "string" || printerId.length === 0) {
-        return undefined;
-    }
-
-    return { id: printerId };
-}
 
 function parseDateFlag(value: unknown, flagName: string, opts?: { endOfDay?: boolean }) {
     if (typeof value !== "string" || value.length === 0) {

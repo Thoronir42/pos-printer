@@ -6,10 +6,8 @@ import {
     listHistoryEntries,
     readHistoryImageDataUrl,
 } from "../utils/imageStorage.ts";
-import type { PrinterSelection } from "../utils/printer.ts";
+import { DEFAULT_PRINT_WIDTH_MM, type PrinterSelection } from "../utils/printer.ts";
 import { createPrintLimiter, type PrintLimiter } from "./printLimiter.ts";
-
-const DEFAULT_REWIND_PRINT_WIDTH_MM = 72;
 
 /** A strategy that decides what happens when a rewound entry is "printed". */
 export type RewindController = {
@@ -24,7 +22,7 @@ const armed: RewindController = {
             imageDataUrl,
             locale: opts.locale,
             printer: opts.printer,
-            widthMm: opts.widthMm ?? DEFAULT_REWIND_PRINT_WIDTH_MM,
+            widthMm: opts.widthMm ?? DEFAULT_PRINT_WIDTH_MM,
             dither: true,
             saveHistory: false,
         });

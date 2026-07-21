@@ -1,14 +1,11 @@
-import { Buffer } from "node:buffer";
 import { Application, Router } from "@oak/oak";
 import { AppError } from "../AppError.ts";
 import printImageAction from "../printTasks/print-image.ts";
 import type { AppContext } from "../utils/context.ts";
 import { getImageMimeType } from "../utils/image.ts";
-import { getHistoryBaseDir, listDayMedia, listHistoryDays } from "../utils/imageStorage.ts";
-import type { PrinterSelection } from "../utils/printer.ts";
+import { getHistoryBaseDir, isSafePathSegment, listDayMedia, listHistoryDays, readImageFileAsDataUrl } from "../utils/imageStorage.ts";
+import { DEFAULT_PRINT_WIDTH_MM, type PrinterSelection } from "../utils/printer.ts";
 import { createPrintLimiter, type PrintLimiter } from "./printLimiter.ts";
-
-const DEFAULT_EXPLORE_PRINT_WIDTH_MM = 72;
 
 export type ExploreOptions = {
     port: number,
@@ -19,43 +16,40 @@ export type ExploreOptions = {
     signal?: AbortSignal,
 };
 
-/** Rejects path segments that are empty or could escape the archive directory. */
-function isSafeSegment(segment: string): boolean {
-    return segment !== "" && !segment.includes("/") && !segment.includes("\\") && segment !== "." && !segment.includes("..");
-}
-
 /** Resolves the on-disk path for a (day, file) pair, or null if it is unsafe. */
 function resolveMediaPath(day: string, file: string): string | null {
-    if (!isSafeSegment(day) || !isSafeSegment(file)) {
+    if (!isSafePathSegment(day) || !isSafePathSegment(file)) {
         return null;
     }
 
     return `${getHistoryBaseDir()}/${day}/${file}`;
 }
 
-export function runExplore(ctx: AppContext, opts: ExploreOptions): Promise<void> {
+export async function runExplore(ctx: AppContext, opts: ExploreOptions): Promise<void> {
     // Fail fast if the archive directory is not configured.
     getHistoryBaseDir();
+
+    // The page is static — read it once at startup instead of on every request.
+    const html = await Deno.readTextFile(`${import.meta.dirname}/explore.html`);
 
     const limiter: PrintLimiter = createPrintLimiter();
     const router = new Router();
 
-    router.get("/", async (routeCtx) => {
-        const html = await Deno.readTextFile(`${import.meta.dirname}/explore.html`);
+    router.get("/", (routeCtx) => {
         routeCtx.response.headers.set("content-type", "text/html; charset=utf-8");
         routeCtx.response.body = html;
     });
 
-    router.get("/api/days", (routeCtx) => {
+    router.get("/api/days", async (routeCtx) => {
         routeCtx.response.type = "json";
-        routeCtx.response.body = { days: listHistoryDays() };
+        routeCtx.response.body = { days: await listHistoryDays() };
     });
 
     // day/file travel as query params (not path segments) so the root day (`""`)
     // does not collapse into an unmatched empty path segment.
     router.get("/api/media", async (routeCtx) => {
         const day = routeCtx.request.url.searchParams.get("day") ?? "";
-        if (!isSafeSegment(day)) {
+        if (!isSafePathSegment(day)) {
             routeCtx.response.status = 400;
             routeCtx.response.body = { error: "invalid-day" };
             return;
@@ -104,13 +98,7 @@ export function runExplore(ctx: AppContext, opts: ExploreOptions): Promise<void>
         }
 
         try {
-            const bytes = await Deno.readFile(path);
-            const mimeType = getImageMimeType(file, null);
-            if (!mimeType) {
-                throw new Error(`Cannot determine mime type for ${file}`);
-            }
-
-            const imageDataUrl = `data:${mimeType};base64,${Buffer.from(bytes).toString("base64")}`;
+            const imageDataUrl = await readImageFileAsDataUrl(path);
 
             // Serialize prints so rapid clicks queue instead of colliding at the printer.
             await limiter.schedule(() =>
@@ -118,7 +106,7 @@ export function runExplore(ctx: AppContext, opts: ExploreOptions): Promise<void>
                     imageDataUrl,
                     locale: opts.locale,
                     printer: opts.printer,
-                    widthMm: opts.widthMm ?? DEFAULT_EXPLORE_PRINT_WIDTH_MM,
+                    widthMm: opts.widthMm ?? DEFAULT_PRINT_WIDTH_MM,
                     dither: true,
                     saveHistory: false,
                 })
@@ -147,5 +135,5 @@ export function runExplore(ctx: AppContext, opts: ExploreOptions): Promise<void>
         ctx.logger.info(`Explore server running on http://${e.hostname}:${e.port}/`);
     });
 
-    return app.listen({ port: opts.port, hostname: opts.hostname, signal: opts.signal });
+    await app.listen({ port: opts.port, hostname: opts.hostname, signal: opts.signal });
 }

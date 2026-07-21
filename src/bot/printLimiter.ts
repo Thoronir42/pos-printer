@@ -22,3 +22,28 @@ export function createPrintLimiter(): Bottleneck {
 }
 
 export type PrintLimiter = Bottleneck;
+
+/** Keyed sliding-window rate limiter for request sources (e.g. Telegram chats). */
+export type SpamGuard = {
+    /** Records a request under the key and returns true when it should be blocked. */
+    registerRequest: (key: number | string) => boolean,
+};
+
+/**
+ * Creates a {@link SpamGuard} that blocks a key once it accumulates
+ * `threshold` requests within the trailing `windowMs` window.
+ */
+export function createSpamGuard({ windowMs, threshold }: { windowMs: number, threshold: number }): SpamGuard {
+    const timestampsByKey = new Map<number | string, number[]>();
+
+    return {
+        registerRequest(key) {
+            const now = Date.now();
+            const recent = (timestampsByKey.get(key) ?? [])
+                .filter((timestamp) => now - timestamp <= windowMs);
+            recent.push(now);
+            timestampsByKey.set(key, recent);
+            return recent.length >= threshold;
+        },
+    };
+}

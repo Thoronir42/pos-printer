@@ -8,15 +8,14 @@ import {
     sendTelegramMessage,
     type TelegramMessage,
     type TelegramPhotoSize,
-    type TelegramSticker,
     type TelegramUpdate,
 } from "../libs/telegram.ts";
 import type { AppContext } from "../utils/context.ts";
 import { createContext } from "../utils/context.ts";
-import { getImageDimensions } from "../utils/image.ts";
+import { bufferToDataUri, formatDimensions, getImageDimensions } from "../utils/image.ts";
 import { saveMediaToHistory } from "../utils/imageStorage.ts";
-import type { PrinterSelection } from "../utils/printer.ts";
-import { createPrintLimiter, type PrintLimiter } from "./printLimiter.ts";
+import { DEFAULT_PRINT_WIDTH_MM, type PrinterSelection } from "../utils/printer.ts";
+import { createPrintLimiter, createSpamGuard, type PrintLimiter } from "./printLimiter.ts";
 
 const MAX_IMAGE_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_IMAGE_WIDTH_PX = 4096;
@@ -24,7 +23,6 @@ const MAX_IMAGE_HEIGHT_PX = 4096;
 const MAX_IMAGE_PIXELS = 12_000_000;
 const DEFAULT_POLLING_TIMEOUT_SECONDS = 30;
 const RETRY_DELAY_MS = 3000;
-const DEFAULT_BOT_PRINT_WIDTH_MM = 72;
 const SPAM_WINDOW_MS = 20_000;
 const SPAM_THRESHOLD = 4;
 const RARE_SPAM_REPLY_PROBABILITY = 0.03;
@@ -46,18 +44,6 @@ export type PrintMediaOptions = {
 type RunTelegramBotOptions = PrintMediaOptions & {
     pollingTimeoutSeconds?: number,
 };
-
-function formatDimensions(width: number, height: number) {
-    return `${width}x${height}`;
-}
-
-function formatOptionalDimensions(dimensions: { width: number, height: number } | null) {
-    if (!dimensions) {
-        return "unknown";
-    }
-
-    return formatDimensions(dimensions.width, dimensions.height);
-}
 
 function selectLargestPhotoVariant(photoSizes: TelegramPhotoSize[]) {
     return photoSizes.reduce((largest, candidate) => {
@@ -143,7 +129,7 @@ export function getMediaName(message: TelegramMessage): string {
 
     if (message.photo?.length) {
         const photo = selectLargestPhotoVariant(message.photo);
-        return `photo ${formatDimensions(photo.width, photo.height)}`;
+        return `photo ${formatDimensions(photo)}`;
     }
 
     return "unknown";
@@ -165,10 +151,6 @@ function assertWithinImageLimits(width: number, height: number, fileSize?: numbe
     if (width * height > MAX_IMAGE_PIXELS) {
         throw new Error(`Image pixel count exceeds ${MAX_IMAGE_PIXELS}`);
     }
-}
-
-function bufferToDataUrl(buffer: Uint8Array, mimeType: string) {
-    return `data:${mimeType};base64,${Buffer.from(buffer).toString("base64")}`;
 }
 
 function messageDateToIso(message: TelegramMessage) {
@@ -202,28 +184,53 @@ async function archiveAndPrint(
     await printImageAction.run(
         ctx.with((ctx) => ({...ctx, logger: ctx.logger.child({action: 'print-image'})})),
         {
-            imageDataUrl: bufferToDataUrl(media.buffer, media.mimeType),
+            imageDataUrl: bufferToDataUri(media.buffer, media.mimeType),
             locale: opts.locale,
             printer: opts.printer,
-            widthMm: opts.widthMm ?? DEFAULT_BOT_PRINT_WIDTH_MM,
+            widthMm: opts.widthMm ?? DEFAULT_PRINT_WIDTH_MM,
             dither: true,
             saveHistory: false,
         },
     );
 }
 
-async function handleStickerMessage(ctx: AppContext, sticker: TelegramSticker, message: TelegramMessage, opts: PrintMediaOptions) {
-    if (sticker.is_animated || sticker.is_video) {
-        throw new Error(`Unsupported sticker type animated=${sticker.is_animated} video=${sticker.is_video}`);
+/** A downloadable, printable media item extracted from a message. */
+type PrintableMedia = {
+    kind: "sticker" | "photo",
+    fileId: string,
+    width: number,
+    height: number,
+    fileSize?: number,
+};
+
+/**
+ * Extracts the printable media a message carries, or null when there is none.
+ * Throws for media we recognize but cannot print (animated/video stickers).
+ */
+function getPrintableMedia(message: TelegramMessage): PrintableMedia | null {
+    const sticker = message.sticker;
+    if (sticker) {
+        if (sticker.is_animated || sticker.is_video) {
+            throw new Error(`Unsupported sticker type animated=${sticker.is_animated} video=${sticker.is_video}`);
+        }
+
+        return { kind: "sticker", fileId: sticker.file_id, width: sticker.width, height: sticker.height, fileSize: sticker.file_size };
     }
 
-    ctx.logger.info(
-        `[telegram] received sticker message=${message.message_id} chat=${message.chat?.id ?? "unknown"} ${formatDimensions(sticker.width, sticker.height)} bytes=${sticker.file_size ?? "unknown"}`,
-    );
+    const photos = message.photo;
+    if (photos?.length) {
+        const photo = selectLargestPhotoVariant(photos);
+        return { kind: "photo", fileId: photo.file_id, width: photo.width, height: photo.height, fileSize: photo.file_size };
+    }
 
-    assertWithinImageLimits(sticker.width, sticker.height, sticker.file_size);
+    return null;
+}
 
-    const file = await getTelegramFile(opts.token, sticker.file_id, opts.signal);
+/** Downloads a media file, enforcing size limits before and after the transfer. */
+async function downloadMedia(ctx: AppContext, media: PrintableMedia, opts: PrintMediaOptions) {
+    assertWithinImageLimits(media.width, media.height, media.fileSize);
+
+    const file = await getTelegramFile(opts.token, media.fileId, opts.signal);
     if (!file.file_path) {
         throw new Error("Telegram file path is missing");
     }
@@ -232,78 +239,44 @@ async function handleStickerMessage(ctx: AppContext, sticker: TelegramSticker, m
         `[telegram] file metadata path=${file.file_path} declaredSize=${file.file_size ?? "unknown"}`,
     );
 
-    assertWithinImageLimits(sticker.width, sticker.height, file.file_size ?? sticker.file_size);
+    assertWithinImageLimits(media.width, media.height, file.file_size ?? media.fileSize);
 
     const { buffer, mimeType } = await downloadTelegramFile(opts.token, file.file_path, opts.signal);
     if (buffer.byteLength > MAX_IMAGE_FILE_BYTES) {
-        throw new Error(`Downloaded sticker exceeds ${MAX_IMAGE_FILE_BYTES} bytes`);
+        throw new Error(`Downloaded ${media.kind} exceeds ${MAX_IMAGE_FILE_BYTES} bytes`);
     }
 
-    ctx.logger.info(
-        `[telegram] downloaded mime=${mimeType} bytes=${buffer.byteLength} targetWidthMm=${opts.widthMm ?? DEFAULT_BOT_PRINT_WIDTH_MM}`,
-    );
-
-    await archiveAndPrint(ctx, message, { buffer, mimeType, fileId: sticker.file_id }, opts);
-
-    ctx.logger.info("Printed Telegram sticker", {
-        chatId: message.chat?.id ?? "unknown",
-        messageId: message.message_id,
-    });
-}
-
-async function handlePhotoMessage(ctx: AppContext, message: TelegramMessage, opts: PrintMediaOptions) {
-    const photos = message.photo;
-    const photo = photos?.length ? selectLargestPhotoVariant(photos) : undefined;
-    if (!photo) {
-        return;
-    }
-
-    ctx.logger.info(
-        `[telegram] received message=${message.message_id} chat=${message.chat?.id ?? "unknown"} variants=${photos?.length ?? 0} selected=${formatDimensions(photo.width, photo.height)} bytes=${photo.file_size ?? "unknown"}`,
-    );
-
-    assertWithinImageLimits(photo.width, photo.height, photo.file_size);
-
-    const file = await getTelegramFile(opts.token, photo.file_id, opts.signal);
-    if (!file.file_path) {
-        throw new Error("Telegram file path is missing");
-    }
-
-    ctx.logger.info(
-        `[telegram] file metadata path=${file.file_path} declaredSize=${file.file_size ?? "unknown"} selected=${formatDimensions(photo.width, photo.height)}`,
-    );
-
-    assertWithinImageLimits(photo.width, photo.height, file.file_size ?? photo.file_size);
-
-    const { buffer, mimeType } = await downloadTelegramFile(opts.token, file.file_path, opts.signal);
-    if (buffer.byteLength > MAX_IMAGE_FILE_BYTES) {
-        throw new Error(`Downloaded image exceeds ${MAX_IMAGE_FILE_BYTES} bytes`);
-    }
-
+    // The declared dimensions describe the source; re-check the actual file.
     const dimensions = getImageDimensions(Buffer.from(buffer), mimeType);
     if (dimensions) {
         assertWithinImageLimits(dimensions.width, dimensions.height, buffer.byteLength);
     }
 
     ctx.logger.info(
-        `[telegram] downloaded mime=${mimeType} bytes=${buffer.byteLength} dimensions=${formatOptionalDimensions(dimensions)} targetWidthMm=${opts.widthMm ?? DEFAULT_BOT_PRINT_WIDTH_MM}`,
+        `[telegram] downloaded mime=${mimeType} bytes=${buffer.byteLength} dimensions=${formatDimensions(dimensions)} targetWidthMm=${opts.widthMm ?? DEFAULT_PRINT_WIDTH_MM}`,
     );
 
-    await archiveAndPrint(ctx, message, { buffer, mimeType, fileId: photo.file_id }, opts);
-
-    ctx.logger.info("Printed Telegram photo", {
-        chatId: message.chat?.id ?? "unknown",
-        messageId: message.message_id,
-    });
+    return { buffer, mimeType };
 }
 
 /** Downloads and prints whatever printable media a message carries. */
-export function processPrintableMessage(ctx: AppContext, message: TelegramMessage, opts: PrintMediaOptions) {
-    if (message.sticker) {
-        return handleStickerMessage(ctx, message.sticker, message, opts);
+export async function processPrintableMessage(ctx: AppContext, message: TelegramMessage, opts: PrintMediaOptions) {
+    const media = getPrintableMedia(message);
+    if (!media) {
+        return;
     }
 
-    return handlePhotoMessage(ctx, message, opts);
+    ctx.logger.info(
+        `[telegram] received ${media.kind} message=${message.message_id} chat=${message.chat?.id ?? "unknown"} ${formatDimensions(media)} bytes=${media.fileSize ?? "unknown"}`,
+    );
+
+    const { buffer, mimeType } = await downloadMedia(ctx, media, opts);
+    await archiveAndPrint(ctx, message, { buffer, mimeType, fileId: media.fileId }, opts);
+
+    ctx.logger.info(`Printed Telegram ${media.kind}`, {
+        chatId: message.chat?.id ?? "unknown",
+        messageId: message.message_id,
+    });
 }
 
 export async function runTelegramBot(ctx: AppContext, opts: RunTelegramBotOptions) {
@@ -311,76 +284,56 @@ export async function runTelegramBot(ctx: AppContext, opts: RunTelegramBotOption
     const me = await getMe(opts.token, opts.signal);
     ctx.logger.info("Telegram bot listening", { username: me.username ?? "unknown" });
 
-    let offset = 0;
-    const requestTimestampsByChatId = new Map<number, number[]>();
+    const spamGuard = createSpamGuard({ windowMs: SPAM_WINDOW_MS, threshold: SPAM_THRESHOLD });
     const limiter: PrintLimiter = createPrintLimiter();
 
+    const reply = (chatId: number, messageId: number, text: string) =>
+        sendTelegramMessage(opts.token, chatId, text, { replyToMessageId: messageId }, opts.signal);
+
+    async function handleUpdate(update: TelegramUpdate) {
+        const message = getProcessableMessage(update);
+        if (!message) {
+            return;
+        }
+
+        const chatId = message.chat?.id;
+        if (chatId == null) {
+            return;
+        }
+
+        if (spamGuard.registerRequest(chatId)) {
+            await reply(chatId, message.message_id, getSpamReply());
+            return;
+        }
+
+        const updateContext: AppContext = createContext(ctx.logger.child({
+            updateId: update.update_id,
+            messageId: message.message_id,
+            chatId,
+        }));
+
+        try {
+            // Serialize prints through the limiter so bursts of requests
+            // are held until the previous print finishes.
+            await limiter.schedule(() => processPrintableMessage(updateContext, message, opts));
+
+            await reply(chatId, message.message_id, getSuccessReply());
+        } catch (error) {
+            updateContext.logger.error("Failed to process Telegram update", {
+                error: error instanceof Error ? error.message : String(error),
+            });
+
+            await reply(chatId, message.message_id, getErrorReply());
+        }
+    }
+
+    let offset = 0;
     while (!opts.signal?.aborted) {
         try {
             const updates = await getUpdates(opts.token, offset, timeoutSeconds, opts.signal);
             for (const update of updates) {
                 offset = update.update_id + 1;
-
-                const message = getProcessableMessage(update);
-                if (!message) {
-                    continue;
-                }
-
-                const chatId = message.chat?.id;
-                if (chatId == null) {
-                    continue;
-                }
-
-                const now = Date.now();
-                const requestTimestamps = requestTimestampsByChatId.get(chatId) ?? [];
-                const recentRequestTimestamps = requestTimestamps
-                    .filter((timestamp) => now - timestamp <= SPAM_WINDOW_MS);
-                recentRequestTimestamps.push(now);
-                requestTimestampsByChatId.set(chatId, recentRequestTimestamps);
-
-                const updateContext: AppContext = createContext(ctx.logger.child({
-                    updateId: update.update_id,
-                    messageId: message.message_id,
-                    chatId,
-                }));
-
-                const spamBlocked = recentRequestTimestamps.length >= SPAM_THRESHOLD;
-                if (spamBlocked) {
-                    await sendTelegramMessage(
-                        opts.token,
-                        chatId,
-                        getSpamReply(),
-                        { replyToMessageId: message.message_id },
-                        opts.signal,
-                    );
-                    continue;
-                }
-
-                try {
-                    // Serialize prints through the limiter so bursts of requests
-                    // are held until the previous print finishes.
-                    await limiter.schedule(() => processPrintableMessage(updateContext, message, opts));
-
-                    await sendTelegramMessage(
-                        opts.token,
-                        chatId,
-                        getSuccessReply(),
-                        { replyToMessageId: message.message_id },
-                        opts.signal,
-                    );
-                } catch (error) {
-                    updateContext.logger.error("Failed to process Telegram update", {
-                        error: error instanceof Error ? error.message : String(error),
-                    });
-
-                    await sendTelegramMessage(
-                        opts.token,
-                        chatId,
-                        getErrorReply(),
-                        { replyToMessageId: message.message_id },
-                        opts.signal,
-                    );
-                }
+                await handleUpdate(update);
             }
         } catch (error) {
             if (opts.signal?.aborted) {

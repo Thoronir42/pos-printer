@@ -32,8 +32,14 @@ type EscposImageWithPixels = InstanceType<typeof escpos.Image> & {
     },
 }
 
+/** Inverse of {@link parseDataUri}: encodes raw image bytes as a base64 data URI. */
+export function bufferToDataUri(buffer: Uint8Array | Buffer, mimeType: string): string {
+    const nodeBuffer = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+    return `data:${mimeType};base64,${nodeBuffer.toString('base64')}`
+}
+
 function loadImageFromBuffer(buffer: Buffer, mimeType: string): Promise<InstanceType<typeof escpos.Image>> {
-    const dataUri = `data:${mimeType};base64,${buffer.toString('base64')}`
+    const dataUri = bufferToDataUri(buffer, mimeType)
     return new Promise((resolve, reject) => {
         escpos.Image.load(dataUri, (result: Error | InstanceType<typeof escpos.Image>) => {
             if (result instanceof Error) {
@@ -307,7 +313,7 @@ function resizeRasterBufferToWidth(buffer: Buffer, mimeType: string, opts?: Load
 
     const targetWidthPx = widthMmToPixels(opts.width)
     const targetHeightPx = Math.max(1, Math.round(sourceDimensions.height * targetWidthPx / sourceDimensions.width))
-    const sourceDataUri = `data:${mimeType};base64,${buffer.toString('base64')}`
+    const sourceDataUri = bufferToDataUri(buffer, mimeType)
 
     const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${targetWidthPx}" height="${targetHeightPx}" viewBox="0 0 ${targetWidthPx} ${targetHeightPx}"><rect width="${targetWidthPx}" height="${targetHeightPx}" fill="white"/><image href="${escapeAttribute(sourceDataUri)}" width="${targetWidthPx}" height="${targetHeightPx}" preserveAspectRatio="none"/></svg>`
     return Buffer.from(new Resvg(svg).render().asPng() as unknown as ArrayBuffer)

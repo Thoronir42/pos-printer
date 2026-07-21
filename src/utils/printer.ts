@@ -43,6 +43,9 @@ const codePageMappings = [
     { codeTable: 47, encoding: 'ISO-8859-2', name: 'ISO-8859-2 (Latin-2)' },
 ]
 
+/** Default printed image width in mm used by the bot/rewind/explore print paths. */
+export const DEFAULT_PRINT_WIDTH_MM = 72;
+
 export type PrinterInfo = {
     id: string,
     vendorId: number,

@@ -3,7 +3,7 @@ import { runExplore } from "../bot/explore.ts";
 import type { AppContext } from "../utils/context.ts";
 import { createContext } from "../utils/context.ts";
 import { createLogger } from "../utils/logger.ts";
-import type { PrinterSelection } from "../utils/printer.ts";
+import { getPrinterSelection, parseWidthMm } from "./flags.ts";
 
 const DEFAULT_PORT = 4545;
 
@@ -18,27 +18,6 @@ function parsePort(value: unknown) {
     }
 
     return parsed;
-}
-
-function parseWidthMm(value: unknown) {
-    if (value == null || value === "") {
-        return undefined;
-    }
-
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 120) {
-        throw new Error("widthMm must be a number between 1 and 120");
-    }
-
-    return parsed;
-}
-
-function getPrinterSelection(printerId: unknown): PrinterSelection | undefined {
-    if (typeof printerId !== "string" || printerId.length === 0) {
-        return undefined;
-    }
-
-    return { id: printerId };
 }
 
 export const cmd = command({

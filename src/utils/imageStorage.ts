@@ -1,6 +1,5 @@
-import { Buffer } from "node:buffer";
 import type { AppContext } from "./context.ts";
-import { extensionFromMimeType, getImageMimeType, parseDataUri } from "./image.ts";
+import { bufferToDataUri, extensionFromMimeType, getImageMimeType, parseDataUri } from "./image.ts";
 
 /** Metadata captured alongside an archived image, stored as a `.json` sidecar. */
 export type HistoryMediaMetadata = {
@@ -52,35 +51,35 @@ function isImageFileName(name: string): boolean {
     return IMAGE_EXTENSIONS.has(extension);
 }
 
+/** True when a path segment is non-empty and cannot escape its parent directory. */
+export function isSafePathSegment(segment: string): boolean {
+    return segment !== "" && !segment.includes("/") && !segment.includes("\\") && segment !== "." && !segment.includes("..");
+}
+
 /** Rejects day names that are empty or could escape the base directory. */
 function assertSafeDay(day: string): void {
-    if (day === "" || day.includes("/") || day.includes("\\") || day === "." || day.includes("..")) {
+    if (!isSafePathSegment(day)) {
         throw new Error(`Invalid day: ${day}`);
     }
 }
 
-function formatHistoryFileName(date: Date, extension: string) {
-    return `${date.toISOString().replace(/:/g, "-")}.${extension}`;
+/** File-name stem (extension-less) for an archived image and its sidecar. */
+function formatHistoryStem(date: Date) {
+    return date.toISOString().replace(/:/g, "-");
 }
 
 function formatDayDirectory(date: Date) {
     return date.toISOString().slice(0, 10);
 }
 
-async function writeImageFile(dirPath: string, fileName: string, buffer: Uint8Array): Promise<string> {
-    await Deno.mkdir(dirPath, { recursive: true });
-    const filePath = `${dirPath}/${fileName}`;
-    await Deno.writeFile(filePath, buffer);
-    return filePath;
-}
-
 /**
  * Saves a printed image to the history directory (if configured). Used by the
- * generic print path that has no richer metadata to attach.
+ * generic print path that has no richer metadata to attach — delegates to
+ * {@link saveMediaToHistory} with a minimal date-only sidecar so all archive
+ * entries share one write path and format.
  */
 export async function saveToHistoryPrints(ctx: AppContext, dataUri: string): Promise<void> {
-    const baseDirPath = getHistoryDir();
-    if (!baseDirPath) {
+    if (!getHistoryDir()) {
         return;
     }
 
@@ -89,12 +88,11 @@ export async function saveToHistoryPrints(ctx: AppContext, dataUri: string): Pro
         return;
     }
 
-    const now = new Date();
-    const extension = extensionFromMimeType(parsed.mimeType);
-    const dirPath = `${baseDirPath}/${formatDayDirectory(now)}`;
-    const filePath = await writeImageFile(dirPath, formatHistoryFileName(now, extension), new Uint8Array(parsed.buffer));
-
-    ctx.logger.debug("Saved print image history", { filePath });
+    await saveMediaToHistory(ctx, {
+        buffer: new Uint8Array(parsed.buffer),
+        mimeType: parsed.mimeType,
+        metadata: { date: new Date().toISOString() },
+    });
 }
 
 /**
@@ -113,24 +111,34 @@ export async function saveMediaToHistory(
     }
 
     const now = new Date();
+    const stem = formatHistoryStem(now);
     const extension = extensionFromMimeType(media.mimeType);
     const dirPath = `${baseDirPath}/${formatDayDirectory(now)}`;
-    const baseName = formatHistoryFileName(now, extension).replace(new RegExp(`\\.${extension}$`), "");
-
-    const imageFileName = `${baseName}.${extension}`;
-    const imagePath = await writeImageFile(dirPath, imageFileName, media.buffer);
+    const imageFileName = `${stem}.${extension}`;
+    const imagePath = `${dirPath}/${imageFileName}`;
 
     const metadata: HistoryMediaMetadata & { image: string } = {
         ...media.metadata,
         mimeType: media.metadata.mimeType ?? media.mimeType,
         image: imageFileName,
     };
-    await Deno.writeTextFile(`${dirPath}/${baseName}.json`, JSON.stringify(metadata, null, 2));
+
+    await Deno.mkdir(dirPath, { recursive: true });
+    // The image and its sidecar are independent files — write them concurrently.
+    const writes = await Promise.allSettled([
+        Deno.writeFile(imagePath, media.buffer),
+        Deno.writeTextFile(`${dirPath}/${stem}.json`, JSON.stringify(metadata, null, 2)),
+    ]);
+    for (const write of writes) {
+        if (write.status === "rejected") {
+            throw write.reason;
+        }
+    }
 
     ctx.logger.debug("Saved media history", { imagePath, sender: media.metadata.sender, mediaName: media.metadata.mediaName });
 }
 
-/** Reverses {@link formatHistoryFileName} to recover the timestamp of a legacy file. */
+/** Reverses {@link formatHistoryStem} to recover the timestamp of a legacy file. */
 function dateFromHistoryFileName(baseName: string): Date | null {
     const restored = baseName.replace(/T(\d{2})-(\d{2})-(\d{2})/, "T$1:$2:$3");
     const date = new Date(restored);
@@ -146,26 +154,73 @@ async function readSidecar(jsonPath: string): Promise<(HistoryMediaMetadata & { 
     }
 }
 
+/**
+ * Resolves an image file's sidecar metadata and effective date: the sidecar
+ * `date` when present, else the timestamp recovered from the file name
+ * (null when neither yields a valid date).
+ */
+async function resolveSidecar(dir: string, fileName: string): Promise<{
+    sidecar: (HistoryMediaMetadata & { image?: string }) | null,
+    receivedAt: Date | null,
+}> {
+    const baseName = fileName.replace(/\.[^.]+$/, "");
+    const sidecar = await readSidecar(`${dir}/${baseName}.json`);
+    const receivedAt = sidecar?.date ? new Date(sidecar.date) : dateFromHistoryFileName(baseName);
+    return {
+        sidecar,
+        receivedAt: receivedAt && !Number.isNaN(receivedAt.getTime()) ? receivedAt : null,
+    };
+}
+
 async function* walkImageFiles(dirPath: string): AsyncGenerator<{ dir: string, name: string }> {
     let entries: Deno.DirEntry[];
     try {
-        entries = [...Deno.readDirSync(dirPath)];
+        entries = await Array.fromAsync(Deno.readDir(dirPath));
     } catch {
         return;
     }
 
     for (const entry of entries) {
-        const path = `${dirPath}/${entry.name}`;
         if (entry.isDirectory) {
-            yield* walkImageFiles(path);
+            yield* walkImageFiles(`${dirPath}/${entry.name}`);
             continue;
         }
 
-        const extension = entry.name.split(".").pop()?.toLowerCase() ?? "";
-        if (entry.isFile && IMAGE_EXTENSIONS.has(extension)) {
+        if (entry.isFile && isImageFileName(entry.name)) {
             yield { dir: dirPath, name: entry.name };
         }
     }
+}
+
+/** Maps one walked file to a {@link HistoryEntry}, or null when dateless or out of range. */
+async function buildHistoryEntry(
+    ctx: AppContext,
+    file: { dir: string, name: string },
+    range: { from: Date, to: Date },
+): Promise<HistoryEntry | null> {
+    const imagePath = `${file.dir}/${file.name}`;
+    const { sidecar, receivedAt } = await resolveSidecar(file.dir, file.name);
+    if (!receivedAt) {
+        ctx.logger.debug("Skipping history file with no resolvable date", { imagePath });
+        return null;
+    }
+
+    if (receivedAt < range.from || receivedAt > range.to) {
+        return null;
+    }
+
+    return {
+        imagePath,
+        receivedAt,
+        hasMetadata: sidecar != null,
+        date: receivedAt.toISOString(),
+        sender: sidecar?.sender,
+        mediaName: sidecar?.mediaName ?? (sidecar ? undefined : file.name),
+        messageId: sidecar?.messageId,
+        chatId: sidecar?.chatId,
+        fileId: sidecar?.fileId,
+        mimeType: sidecar?.mimeType ?? getImageMimeType(file.name, null) ?? undefined,
+    };
 }
 
 /**
@@ -183,36 +238,13 @@ export async function listHistoryEntries(
         throw new Error("POS_HISTORY_PRINTS is not set; nothing to rewind from");
     }
 
-    const entries: HistoryEntry[] = [];
-
-    for await (const { dir, name } of walkImageFiles(baseDirPath)) {
-        const baseName = name.replace(/\.[^.]+$/, "");
-        const imagePath = `${dir}/${name}`;
-
-        const sidecar = await readSidecar(`${dir}/${baseName}.json`);
-        const receivedAt = sidecar?.date ? new Date(sidecar.date) : dateFromHistoryFileName(baseName);
-        if (!receivedAt || Number.isNaN(receivedAt.getTime())) {
-            ctx.logger.debug("Skipping history file with no resolvable date", { imagePath });
-            continue;
-        }
-
-        if (receivedAt < range.from || receivedAt > range.to) {
-            continue;
-        }
-
-        entries.push({
-            imagePath,
-            receivedAt,
-            hasMetadata: sidecar != null,
-            date: receivedAt.toISOString(),
-            sender: sidecar?.sender,
-            mediaName: sidecar?.mediaName ?? (sidecar ? undefined : name),
-            messageId: sidecar?.messageId,
-            chatId: sidecar?.chatId,
-            fileId: sidecar?.fileId,
-            mimeType: sidecar?.mimeType ?? getImageMimeType(name, null) ?? undefined,
-        });
-    }
+    const files = await Array.fromAsync(walkImageFiles(baseDirPath));
+    // Per-file sidecar reads are independent — run them concurrently; the sort re-imposes order.
+    const results = await Promise.allSettled(files.map((file) => buildHistoryEntry(ctx, file, range)));
+    const entries = results
+        .filter((result): result is PromiseFulfilledResult<HistoryEntry | null> => result.status === "fulfilled")
+        .map((result) => result.value)
+        .filter((entry): entry is HistoryEntry => entry != null);
 
     entries.sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime());
     return entries;
@@ -245,35 +277,51 @@ export type DayMediaEntry = {
  * Lists the days (subfolders) available in the history archive. Sorted newest
  * day first. Loose image files in the base directory itself are ignored.
  */
-export function listHistoryDays(): HistoryDay[] {
+export async function listHistoryDays(): Promise<HistoryDay[]> {
     const baseDirPath = getHistoryBaseDir();
 
     let entries: Deno.DirEntry[];
     try {
-        entries = [...Deno.readDirSync(baseDirPath)];
+        entries = await Array.fromAsync(Deno.readDir(baseDirPath));
     } catch {
         return [];
     }
 
-    const days: HistoryDay[] = [];
-
-    for (const entry of entries) {
-        if (!entry.isDirectory) {
-            continue;
-        }
-
-        let count = 0;
-        for (const child of Deno.readDirSync(`${baseDirPath}/${entry.name}`)) {
-            if (child.isFile && isImageFileName(child.name)) {
-                count += 1;
+    // Day folders are independent — count their images concurrently.
+    const days = await Promise.all(
+        entries.filter((entry) => entry.isDirectory).map(async (entry) => {
+            let count = 0;
+            for await (const child of Deno.readDir(`${baseDirPath}/${entry.name}`)) {
+                if (child.isFile && isImageFileName(child.name)) {
+                    count += 1;
+                }
             }
-        }
-        days.push({ name: entry.name, count });
-    }
+            return { name: entry.name, count };
+        }),
+    );
 
     days.sort((a, b) => b.name.localeCompare(a.name));
 
     return days;
+}
+
+/** Maps one image file in a day folder to a {@link DayMediaEntry}. */
+async function buildDayMediaEntry(dirPath: string, fileName: string): Promise<DayMediaEntry> {
+    // The sidecar read and the stat are independent — run them concurrently.
+    const [meta, stat] = await Promise.allSettled([
+        resolveSidecar(dirPath, fileName),
+        Deno.stat(`${dirPath}/${fileName}`),
+    ]);
+    const { sidecar, receivedAt } = meta.status === "fulfilled" ? meta.value : { sidecar: null, receivedAt: null };
+
+    return {
+        file: fileName,
+        size: stat.status === "fulfilled" ? stat.value.size : 0,
+        mimeType: getImageMimeType(fileName, null),
+        receivedAt: receivedAt?.toISOString() ?? null,
+        hasMetadata: sidecar != null,
+        metadata: sidecar,
+    };
 }
 
 /**
@@ -289,40 +337,17 @@ export async function listDayMedia(day: string): Promise<DayMediaEntry[]> {
 
     let dirEntries: Deno.DirEntry[];
     try {
-        dirEntries = [...Deno.readDirSync(dirPath)];
+        dirEntries = await Array.fromAsync(Deno.readDir(dirPath));
     } catch {
         return [];
     }
 
-    const media: DayMediaEntry[] = [];
-
-    for (const dirEntry of dirEntries) {
-        if (!dirEntry.isFile || !isImageFileName(dirEntry.name)) {
-            continue;
-        }
-
-        const baseName = dirEntry.name.replace(/\.[^.]+$/, "");
-        const filePath = `${dirPath}/${dirEntry.name}`;
-
-        const sidecar = await readSidecar(`${dirPath}/${baseName}.json`);
-        const receivedAt = sidecar?.date ? new Date(sidecar.date) : dateFromHistoryFileName(baseName);
-
-        let size = 0;
-        try {
-            size = (await Deno.stat(filePath)).size;
-        } catch {
-            size = 0;
-        }
-
-        media.push({
-            file: dirEntry.name,
-            size,
-            mimeType: getImageMimeType(dirEntry.name, null),
-            receivedAt: receivedAt && !Number.isNaN(receivedAt.getTime()) ? receivedAt.toISOString() : null,
-            hasMetadata: sidecar != null,
-            metadata: sidecar,
-        });
-    }
+    // Per-file metadata reads are independent — run them concurrently; the sort re-imposes order.
+    const media = await Promise.all(
+        dirEntries
+            .filter((entry) => entry.isFile && isImageFileName(entry.name))
+            .map((entry) => buildDayMediaEntry(dirPath, entry.name)),
+    );
 
     media.sort((a, b) => {
         const at = a.receivedAt ?? a.file;
@@ -333,13 +358,18 @@ export async function listDayMedia(day: string): Promise<DayMediaEntry[]> {
     return media;
 }
 
-/** Reads an archived image back as a data URL ready for the print action. */
-export async function readHistoryImageDataUrl(entry: HistoryEntry): Promise<string> {
-    const buffer = await Deno.readFile(entry.imagePath);
-    const mimeType = entry.mimeType ?? getImageMimeType(entry.imagePath, null);
-    if (!mimeType) {
-        throw new Error(`Cannot determine mime type for ${entry.imagePath}`);
+/** Reads an image file back as a data URL ready for the print action. */
+export async function readImageFileAsDataUrl(filePath: string, mimeType?: string): Promise<string> {
+    const buffer = await Deno.readFile(filePath);
+    const resolvedMimeType = mimeType ?? getImageMimeType(filePath, null);
+    if (!resolvedMimeType) {
+        throw new Error(`Cannot determine mime type for ${filePath}`);
     }
 
-    return `data:${mimeType};base64,${Buffer.from(buffer).toString("base64")}`;
+    return bufferToDataUri(buffer, resolvedMimeType);
+}
+
+/** Reads an archived image back as a data URL ready for the print action. */
+export function readHistoryImageDataUrl(entry: HistoryEntry): Promise<string> {
+    return readImageFileAsDataUrl(entry.imagePath, entry.mimeType);
 }
