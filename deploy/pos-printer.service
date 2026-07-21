@@ -1,0 +1,22 @@
+[Unit]
+Description=POS Printer Telegram bot
+Documentation=https://github.com/Thoronir42/pos-printer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__HOME__/pos-printer
+Environment=HOME=__HOME__
+Environment=DENO_DIR=__HOME__/.cache/deno
+# Raw USB (libusb) access to the thermal printer. The 99-pos-printer udev rule
+# grants the plugdev group access to the device node.
+SupplementaryGroups=plugdev lp
+# `deno task bot` already passes --env-file, so it reads __HOME__/pos-printer/.env
+ExecStart=__HOME__/.deno/bin/deno task bot
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

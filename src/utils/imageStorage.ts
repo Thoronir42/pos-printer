@@ -27,7 +27,7 @@ export type HistoryEntry = HistoryMediaMetadata & {
 
 const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp"]);
 
-function getHistoryDir(): string | null {
+export function getHistoryDir(): string | null {
     const historyDir = Deno.env.get("POS_HISTORY_PRINTS");
     if (!historyDir) {
         return null;
@@ -299,7 +299,10 @@ async function sumDirectorySizes(dirPath: string): Promise<{ bytes: number, file
  * empty. Used by the janitor disk-usage report.
  */
 export async function getHistoryUsage(): Promise<HistoryUsage> {
-    const baseDirPath = getHistoryBaseDir();
+    const baseDirPath = getHistoryDir();
+    if (!baseDirPath) {
+        return { totalBytes: 0, fileCount: 0, dayCount: 0 };
+    }
 
     let dayCount = 0;
     try {

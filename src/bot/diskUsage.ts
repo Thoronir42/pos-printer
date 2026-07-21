@@ -1,5 +1,5 @@
 import type { AppContext } from "../utils/context.ts";
-import { getHistoryBaseDir, getHistoryUsage } from "../utils/imageStorage.ts";
+import { getHistoryDir, getHistoryUsage } from "../utils/imageStorage.ts";
 
 /** Human-readable byte size (binary units). */
 function formatBytes(bytes: number): string {
@@ -79,17 +79,26 @@ async function readFilesystem(ctx: AppContext, path: string): Promise<Filesystem
  * consumes plus the free space on the partition holding it.
  */
 export async function buildDiskReport(ctx: AppContext): Promise<string> {
-    const baseDir = getHistoryBaseDir();
-    const usage = await getHistoryUsage();
+    // The archive is opt-in (POS_HISTORY_PRINTS). When it is unset, still report
+    // free space for the working directory instead of failing the command.
+    const baseDir = getHistoryDir();
 
-    const lines = [
-        "🗃 Print archive",
-        `• Size: ${formatBytes(usage.totalBytes)}`,
-        `• Files: ${usage.fileCount} across ${usage.dayCount} day(s)`,
-        `• Path: ${baseDir}`,
-    ];
+    const lines = ["🗃 Print archive"];
+    if (baseDir) {
+        const usage = await getHistoryUsage();
+        lines.push(
+            `• Size: ${formatBytes(usage.totalBytes)}`,
+            `• Files: ${usage.fileCount} across ${usage.dayCount} day(s)`,
+            `• Path: ${baseDir}`,
+        );
+    } else {
+        lines.push("• Not configured — set POS_HISTORY_PRINTS to archive prints");
+    }
 
-    const fs = await readFilesystem(ctx, baseDir);
+    // df the archive dir when configured, otherwise the working directory; fall
+    // back to the working directory if the archive dir does not exist yet.
+    const fs = (await readFilesystem(ctx, baseDir ?? ".")) ??
+        (baseDir ? await readFilesystem(ctx, ".") : null);
     if (fs) {
         lines.push(
             "",
