@@ -1,0 +1,20 @@
+[Unit]
+Description=pos-printer Telegram bot
+Documentation=https://github.com/Thoronir42/pos-printer/blob/main/docs/rpi-runtime.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/pos-printer
+# Runs the `bot` task from deno.json, which loads .env and applies the
+# project's permission flags. Runs as root so the USB printer (accessed via
+# libusb/FFI) works without extra udev rules on a single-purpose appliance.
+Environment=HOME=/root
+Environment=DENO_DIR=/opt/pos-printer/.cache/deno
+ExecStart=/opt/deno/bin/deno task bot
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

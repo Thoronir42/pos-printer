@@ -1,0 +1,16 @@
+[Unit]
+Description=pos-printer first-boot provisioning
+Documentation=https://github.com/Thoronir42/pos-printer/blob/main/docs/rpi-runtime.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Clones the repo (if needed) then runs deploy/provision.sh, which installs the
+# main service and, on success, disables this one so it never runs again.
+# If provisioning fails, the unit stays enabled and retries on the next boot.
+ExecStart=/usr/local/sbin/pos-printer-bootstrap.sh
+
+[Install]
+WantedBy=multi-user.target
